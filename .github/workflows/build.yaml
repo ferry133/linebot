@@ -7,12 +7,13 @@ on:
     paths:
       - "Dockerfile"
       - "trello_line_notifier.py"
+      - "linebot_server.py"
       - "gantt_generator.py"
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/trello-notifier
+  IMAGE_NAME: ${{ github.repository_owner }}/linebot
 
 jobs:
   build-and-push:
