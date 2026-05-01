@@ -12,6 +12,7 @@ import os
 import hmac
 import hashlib
 import base64
+import time
 import threading
 from collections import OrderedDict
 from datetime import datetime, date
@@ -40,6 +41,7 @@ MODEL = "claude-haiku-4-5-20251001"
 MAX_HISTORY = 20    # 每位用戶保留最近 N 則對話
 MAX_TOOL_TURNS = 5  # agentic loop 最多輪次
 MAX_USERS = 500     # _history LRU 上限；超過時淘汰最久未使用的 user
+TRELLO_CACHE_TTL = 60  # 秒；Trello 全掃描結果的快取時間
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
@@ -136,8 +138,17 @@ def append_history(user_id: str, messages: list):
 
 
 # ── Trello 查詢工具 ───────────────────────────────────────────────────────────
+_trello_cache: dict = {"items": None, "ts": 0.0}
+_trello_cache_lock = threading.Lock()
+
+
 def _scan_all_items() -> list[dict]:
-    """掃描所有看板，回傳工項清單"""
+    """掃描所有看板，回傳工項清單（60 秒內重複呼叫直接回傳快取）"""
+    now = time.monotonic()
+    with _trello_cache_lock:
+        if _trello_cache["items"] is not None and now - _trello_cache["ts"] < TRELLO_CACHE_TTL:
+            return list(_trello_cache["items"])
+
     boards = get_boards()
     items = []
     for board in boards:
@@ -173,6 +184,9 @@ def _scan_all_items() -> list[dict]:
                         "names": names, "start": str(start), "end": str(end),
                         "state": item["state"], "source": "checklist",
                     })
+    with _trello_cache_lock:
+        _trello_cache["items"] = items
+        _trello_cache["ts"] = time.monotonic()
     return items
 
 
