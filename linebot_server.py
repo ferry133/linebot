@@ -9,11 +9,12 @@ LINE Bot Webhook Server — 意念情境室內裝修 客服 Robot
 """
 
 import os
-import json
 import hmac
 import hashlib
 import base64
-from datetime import datetime
+import threading
+from collections import OrderedDict
+from datetime import datetime, date
 
 import anthropic
 import requests
@@ -35,10 +36,10 @@ LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_NOTIFY_GROUP_ID = os.environ.get("LINE_NOTIFY_GROUP_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-LINE_REPLY_API = "https://api.line.me/v2/bot/message/reply"
 MODEL = "claude-haiku-4-5-20251001"
-MAX_HISTORY = 20   # 每位用戶保留最近 N 則對話
+MAX_HISTORY = 20    # 每位用戶保留最近 N 則對話
 MAX_TOOL_TURNS = 5  # agentic loop 最多輪次
+MAX_USERS = 500     # _history LRU 上限；超過時淘汰最久未使用的 user
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
@@ -105,18 +106,33 @@ TOOLS = [
     }
 ]
 
-# ── 對話記憶 ──────────────────────────────────────────────────────────────────
-_history: dict[str, list] = {}  # user_id → messages[]
+# ── 對話記憶（LRU，thread-safe）────────────────────────────────────────────────
+# 結構：OrderedDict[user_id → {"messages": [...]}]
+# 存取時 move_to_end；超過 MAX_USERS 時從頭部淘汰最久未使用的 user。
+_history: OrderedDict = OrderedDict()
+_history_lock = threading.Lock()
 
 
 def get_history(user_id: str) -> list:
-    return list(_history.get(user_id, []))
+    with _history_lock:
+        entry = _history.get(user_id)
+        if entry:
+            _history.move_to_end(user_id)
+            return list(entry["messages"])
+        return []
 
 
 def append_history(user_id: str, messages: list):
-    h = _history.get(user_id, [])
-    h.extend(messages)
-    _history[user_id] = h[-MAX_HISTORY:]
+    with _history_lock:
+        if user_id in _history:
+            entry = _history[user_id]
+            _history.move_to_end(user_id)
+        else:
+            if len(_history) >= MAX_USERS:
+                _history.popitem(last=False)  # 淘汰最久未使用的 user
+            entry = {"messages": []}
+            _history[user_id] = entry
+        entry["messages"] = (entry["messages"] + messages)[-MAX_HISTORY:]
 
 
 # ── Trello 查詢工具 ───────────────────────────────────────────────────────────
@@ -170,12 +186,22 @@ def execute_query_trello(query_type: str, keyword: str = "") -> str:
         return "目前 Trello 無任何有標記的工項。"
 
     if query_type == "overdue":
-        filtered = [i for i in items if i["end"] != "None" and days_diff(
-            __import__("datetime").date.fromisoformat(i["end"])) < 0]
+        # 只顯示未完成的逾期工項
+        filtered = [
+            i for i in items
+            if i["end"] != "None"
+            and i.get("state") != "complete"
+            and days_diff(date.fromisoformat(i["end"])) < 0
+        ]
         label = "逾期工項"
     elif query_type == "upcoming":
-        filtered = [i for i in items if i["end"] != "None" and 0 <= days_diff(
-            __import__("datetime").date.fromisoformat(i["end"])) <= 7]
+        # 只顯示未完成的即將到期工項
+        filtered = [
+            i for i in items
+            if i["end"] != "None"
+            and i.get("state") != "complete"
+            and 0 <= days_diff(date.fromisoformat(i["end"])) <= 7
+        ]
         label = "7 天內到期工項"
     elif query_type == "specific" and keyword:
         kw = keyword.lower()
@@ -302,16 +328,19 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return base64.b64encode(h).decode() == signature
 
 
-def reply_line(reply_token: str, message: str):
-    headers = {
-        "Authorization": f"Bearer {LINE_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "replyToken": reply_token,
-        "messages": [{"type": "text", "text": message}],
-    }
-    requests.post(LINE_REPLY_API, headers=headers, json=body)
+def _process_message(user_id: str, text: str):
+    """背景執行：Claude 處理完畢後以 Push API 回覆客戶。"""
+    try:
+        response_text = ask_claude(user_id, text)
+        status, resp_body = send_line(user_id, response_text)
+        if status != 200:
+            print(f"[WARN] Push API failed for {user_id[:8]}: HTTP {status} {resp_body}")
+    except Exception as e:
+        print(f"[ERROR] _process_message for {user_id[:8]}: {e}")
+        try:
+            send_line(user_id, "抱歉，系統暫時異常，請稍後再試。")
+        except Exception:
+            pass
 
 
 # ── Flask App ─────────────────────────────────────────────────────────────────
@@ -341,13 +370,17 @@ def webhook():
 
         user_id = event.get("source", {}).get("userId", "unknown")
         text = msg.get("text", "").strip()
-        reply_token = event.get("replyToken", "")
 
         if not text:
             continue
 
-        response_text = ask_claude(user_id, text)
-        reply_line(reply_token, response_text)
+        # 立即回 200，背景處理後以 Push API 回覆客戶
+        # （避免 Claude + Trello 耗時超過 LINE webhook 10 秒 timeout）
+        threading.Thread(
+            target=_process_message,
+            args=(user_id, text),
+            daemon=True,
+        ).start()
 
     return "OK"
 
