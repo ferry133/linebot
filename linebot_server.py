@@ -18,6 +18,9 @@ from collections import OrderedDict
 from datetime import datetime, date
 
 import anthropic
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
 import requests
 from flask import Flask, request, abort
 
@@ -36,6 +39,8 @@ LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_NOTIFY_GROUP_ID = os.environ.get("LINE_NOTIFY_GROUP_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+AGENT_ID = "customer_service"
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_HISTORY = 20    # 每位用戶保留最近 N 則對話
@@ -108,9 +113,58 @@ TOOLS = [
     }
 ]
 
-# ── 對話記憶（LRU，thread-safe）────────────────────────────────────────────────
-# 結構：OrderedDict[user_id → {"messages": [...]}]
-# 存取時 move_to_end；超過 MAX_USERS 時從頭部淘汰最久未使用的 user。
+# ── DB connection pool (lazy init) ───────────────────────────────────────────
+_db_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+_db_pool_lock = threading.Lock()
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool | None:
+    global _db_pool
+    if _db_pool is not None:
+        return _db_pool
+    if not DATABASE_URL:
+        return None
+    with _db_pool_lock:
+        if _db_pool is None:
+            try:
+                _db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10, DATABASE_URL)
+                print("[INFO] DB pool initialized")
+            except Exception as e:
+                print(f"[WARN] DB pool init failed: {e}")
+    return _db_pool
+
+
+def _db_exec(fn):
+    """Run fn(conn) with a pooled connection; return None on error."""
+    pool = _get_pool()
+    if not pool:
+        return None
+    conn = None
+    try:
+        conn = pool.getconn()
+        result = fn(conn)
+        conn.commit()
+        return result
+    except Exception as e:
+        print(f"[WARN] DB error: {e}")
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return None
+    finally:
+        if conn:
+            try:
+                pool.putconn(conn)
+            except Exception:
+                pass
+
+
+# ── 對話記憶（in-memory LRU cache + PostgreSQL write-through）─────────────────
+# in-memory: OrderedDict[user_id → {"messages": [...]}]，上限 MAX_USERS
+# DB: working_memory 表（agent_id="customer_service", thread_id=user_id）
+# 若 DATABASE_URL 未設或 DB 不可用，graceful fallback 為純 in-memory。
 _history: OrderedDict = OrderedDict()
 _history_lock = threading.Lock()
 
@@ -121,7 +175,25 @@ def get_history(user_id: str) -> list:
         if entry:
             _history.move_to_end(user_id)
             return list(entry["messages"])
-        return []
+
+    # Cache miss：從 DB 載入（重啟後恢復對話）
+    def load(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT messages FROM working_memory WHERE agent_id = %s AND thread_id = %s",
+                (AGENT_ID, user_id),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    messages = _db_exec(load)
+    if messages:
+        with _history_lock:
+            if len(_history) >= MAX_USERS:
+                _history.popitem(last=False)
+            _history[user_id] = {"messages": messages}
+        return list(messages)
+    return []
 
 
 def append_history(user_id: str, messages: list):
@@ -131,10 +203,27 @@ def append_history(user_id: str, messages: list):
             _history.move_to_end(user_id)
         else:
             if len(_history) >= MAX_USERS:
-                _history.popitem(last=False)  # 淘汰最久未使用的 user
+                _history.popitem(last=False)
             entry = {"messages": []}
             _history[user_id] = entry
         entry["messages"] = (entry["messages"] + messages)[-MAX_HISTORY:]
+        updated = list(entry["messages"])
+
+    # Write-through to DB
+    def save(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO working_memory (agent_id, thread_id, messages)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (agent_id, thread_id) DO UPDATE SET
+                    messages   = EXCLUDED.messages,
+                    updated_at = now()
+                """,
+                (AGENT_ID, user_id, psycopg2.extras.Json(updated)),
+            )
+
+    _db_exec(save)
 
 
 # ── Trello 查詢工具 ───────────────────────────────────────────────────────────

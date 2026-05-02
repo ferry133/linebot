@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 安裝依賴
-pip3 install requests flask anthropic
+pip3 install requests flask anthropic psycopg2-binary
 
 # 啟動客服 Bot Webhook Server
 python3 linebot_server.py
@@ -95,6 +95,33 @@ CronJob → trello_line_notifier.py [morning|noon|evening]
 
 ### Escalation Fallback
 若 `LINE_NOTIFY_GROUP_ID` 未設定，從 `line_contacts.json` 讀取 `sa`、`larry` 的 userId 逐一推播。
+
+## Shared Memory DB
+
+所有 Agent 和 k8scc Claude Code 共用同一個 PostgreSQL `knowledge` 表，用 `agent_id` 隔離：
+
+| agent_id | 擁有者 |
+|----------|--------|
+| `customer_service` | LINE 客服 Agent |
+| `trello_agent` | Trello 查詢 Agent |
+| `<user@email>` | k8scc 已驗證用戶（Auth0 email） |
+| `claude_code` | k8scc 匿名模式 |
+
+**DB Schema**（見 `migrations/001_init.sql`）：
+- `knowledge`：語意記憶，`fact` + `confidence` + `source_count`（信心度加權平均）
+- `episodes`：情節記憶，每次行動的完整紀錄 + 品質評分
+- `working_memory`：工作記憶，對話 messages 陣列（支援 Agent 重啟恢復）
+
+**MCP Memory Server**（k8scc 和本機 CLI 共用）：
+- 腳本：`/Users/ferry133/.local/bin/memory_mcp_server.py`（來自 k8scc repo）
+- 工具：`remember(fact, confidence)` / `recall(topic)` / `forget(fact)`
+- 連線：`DATABASE_URL` env var（與 linebot agents 同一個 PostgreSQL）
+
+**env var 新增**：
+
+| 變數 | 用途 |
+|------|------|
+| `DATABASE_URL` | PostgreSQL 連線字串（linebot agents + k8scc 共用） |
 
 ## k8s 部署備註
 

@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY trello_line_notifier.py linebot_server.py gantt_generator.py ./
 
-RUN pip install --no-cache-dir requests flask anthropic
+RUN pip install --no-cache-dir requests flask anthropic psycopg2-binary
 
 # 兩種執行模式（由 k8s workload 的 command 指定）：
 #   Webhook server:  python /app/linebot_server.py
