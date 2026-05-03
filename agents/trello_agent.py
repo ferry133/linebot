@@ -8,7 +8,6 @@ Trello Agent — 獨立 process
 """
 
 import logging
-import os
 import time
 from datetime import datetime, date
 
@@ -18,9 +17,10 @@ log = logging.getLogger(__name__)
 
 from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
+from shared.db import db_exec
 from trello_line_notifier import (
     TAIPEI,
-    get_boards,
+    WORKSPACE_ID,
     get_boards_batch,
     parse_tag,
     days_diff,
@@ -30,20 +30,24 @@ AGENT_ID = "trello_agent"
 REQUEST_TOPIC = "agents/trello/requests"
 TRELLO_CACHE_TTL = 60
 
-# Comma-separated board IDs to monitor (e.g. "abc123,def456").
-# If set, get_boards() is skipped entirely — much faster cold scan.
-_BOARD_IDS_ENV = os.environ.get("TRELLO_BOARD_IDS", "")
-
 
 class TrelloAgent:
     def __init__(self, broker: MQTTBroker):
         self.broker = broker
         self.memory = AgentMemory(AGENT_ID)
         self._cache: dict = {"items": None, "ts": 0.0}
-        # id → name, refreshed daily from get_boards() when TRELLO_BOARD_IDS is set
-        self._board_names: dict[str, str] = {}
-        self._board_names_ts: float = 0.0
-        self._target_ids: list[str] = [b.strip() for b in _BOARD_IDS_ENV.split(",") if b.strip()]
+
+    def _load_boards_from_db(self) -> list[dict]:
+        """Read board id/name from trello_boards table. Returns [] if DB unavailable."""
+        def _fetch(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT board_id, board_name FROM trello_boards WHERE workspace_id = %s",
+                    (WORKSPACE_ID,),
+                )
+                return [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
+        result = db_exec(_fetch)
+        return result or []
 
     def start(self):
         self.broker.subscribe(REQUEST_TOPIC, self._on_request)
@@ -67,13 +71,14 @@ class TrelloAgent:
         })
 
     def _get_target_boards(self) -> list[dict]:
-        if self._target_ids:
-            if time.monotonic() - self._board_names_ts > 86400:
-                self._board_names = {b["id"]: b["name"] for b in get_boards()}
-                self._board_names_ts = time.monotonic()
-                log.info(f"[{AGENT_ID}] Board names refreshed ({len(self._board_names)} boards)")
-            return [{"id": bid, "name": self._board_names.get(bid, bid)}
-                    for bid in self._target_ids]
+        boards = self._load_boards_from_db()
+        if boards:
+            filtered = [b for b in boards if "母版" not in b["name"]]
+            log.info(f"[{AGENT_ID}] Loaded {len(filtered)} boards from DB")
+            return filtered
+        # DB empty (sync job not yet run) — fall back to live API
+        log.info(f"[{AGENT_ID}] DB has no boards, falling back to Trello API")
+        from trello_line_notifier import get_boards
         return [b for b in get_boards() if "母版" not in b["name"]]
 
     def _scan_all_items(self) -> list[dict]:
@@ -83,11 +88,8 @@ class TrelloAgent:
             return list(self._cache["items"])
 
         target = self._get_target_boards()
-        board_ids = [b["id"] for b in target]
-        # name lookup for fallback (when _target_ids not set, _get_target_boards already has names)
         name_map = {b["id"]: b["name"] for b in target}
-
-        boards_data = get_boards_batch(board_ids)
+        boards_data = get_boards_batch([b["id"] for b in target])
         items = []
         for board in boards_data:
             board_name = name_map.get(board["id"], board["name"])
