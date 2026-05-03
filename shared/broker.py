@@ -67,7 +67,7 @@ class MQTTBroker:
         except Exception:
             payload = {"raw": msg.payload.decode()}
 
-        handler = self._handlers.get(topic)
+        handler = self._handlers.get(topic) or self._match_wildcard(topic)
         if handler:
             try:
                 handler(payload)
@@ -75,3 +75,11 @@ class MQTTBroker:
                 print(f"[MQTT] Handler error on {topic}: {e}")
         else:
             print(f"[MQTT] No handler for topic: {topic}")
+
+    def _match_wildcard(self, topic: str):
+        for pattern, handler in self._handlers.items():
+            if pattern.endswith("/#"):
+                prefix = pattern[:-2]
+                if topic.startswith(prefix + "/") or topic == prefix:
+                    return handler
+        return None

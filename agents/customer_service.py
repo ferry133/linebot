@@ -111,6 +111,7 @@ class CustomerServiceAgent:
 
     def start(self):
         self.broker.subscribe(INBOX_TOPIC, self._on_message)
+        self.broker.subscribe(f"{TRELLO_REPLY_PREFIX}/#", self._on_trello_reply)
         print(f"[{AGENT_ID}] Listening on {INBOX_TOPIC}")
 
     # ── MQTT handler ──────────────────────────────────────────────────────────
@@ -260,18 +261,21 @@ class CustomerServiceAgent:
 
     # ── Trello（委託 TrelloAgent via MQTT）────────────────────────────────────
 
+    def _on_trello_reply(self, payload: dict):
+        request_id = payload.get("request_id", "")
+        if request_id in self._pending:
+            event, result = self._pending[request_id]
+            result[0] = payload.get("result", "查詢失敗")
+            event.set()
+
     def _query_trello(self, query_type: str, keyword: str = "") -> str:
         request_id = str(uuid.uuid4())
         reply_topic = f"{TRELLO_REPLY_PREFIX}/{request_id}"
 
         event = threading.Event()
         result = [None]
+        self._pending[request_id] = (event, result)
 
-        def on_reply(payload: dict):
-            result[0] = payload.get("result", "查詢失敗")
-            event.set()
-
-        self.broker.subscribe(reply_topic, on_reply)
         self.broker.publish(TRELLO_REQUEST_TOPIC, {
             "request_id": request_id,
             "reply_to": reply_topic,
@@ -279,10 +283,13 @@ class CustomerServiceAgent:
             "keyword": keyword,
         })
 
-        if event.wait(timeout=TRELLO_TIMEOUT):
-            return result[0]
-        print(f"[{AGENT_ID}] Trello request {request_id[:8]} timed out")
-        return "查詢 Trello 逾時，請稍後再試。"
+        try:
+            if event.wait(timeout=TRELLO_TIMEOUT):
+                return result[0]
+            print(f"[{AGENT_ID}] Trello request {request_id[:8]} timed out")
+            return "查詢 Trello 逾時，請稍後再試。"
+        finally:
+            self._pending.pop(request_id, None)
 
     # ── Escalation ────────────────────────────────────────────────────────────
 
