@@ -6,9 +6,7 @@ on:
     branches: ["main"]
     paths:
       - "Dockerfile"
-      - "trello_line_notifier.py"
-      - "linebot_server.py"
-      - "gantt_generator.py"
+      - "**.py"
   workflow_dispatch:
 
 env:
