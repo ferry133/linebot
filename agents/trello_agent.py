@@ -41,8 +41,9 @@ class TrelloAgent:
         self.broker = broker
         self.memory = AgentMemory(AGENT_ID)
         self._cache: dict = {"items": None, "ts": 0.0}
-        # id → name, populated once from get_boards() when TRELLO_BOARD_IDS is set
+        # id → name, refreshed daily from get_boards() when TRELLO_BOARD_IDS is set
         self._board_names: dict[str, str] = {}
+        self._board_names_ts: float = 0.0
         self._target_ids: list[str] = [b.strip() for b in _BOARD_IDS_ENV.split(",") if b.strip()]
 
     def start(self):
@@ -68,9 +69,10 @@ class TrelloAgent:
 
     def _get_target_boards(self) -> list[dict]:
         if self._target_ids:
-            if not self._board_names:
-                for b in get_boards():
-                    self._board_names[b["id"]] = b["name"]
+            if time.monotonic() - self._board_names_ts > 86400:
+                self._board_names = {b["id"]: b["name"] for b in get_boards()}
+                self._board_names_ts = time.monotonic()
+                log.info(f"[{AGENT_ID}] Board names refreshed ({len(self._board_names)} boards)")
             return [{"id": bid, "name": self._board_names.get(bid, bid)}
                     for bid in self._target_ids]
         return [b for b in get_boards() if "母版" not in b["name"]]
