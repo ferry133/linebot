@@ -288,7 +288,6 @@ class CustomerServiceAgent:
             return list(self._trello_cache["items"])
 
         boards = get_boards()
-        print(f"[{AGENT_ID}] Trello boards: {[b['name'] for b in boards]}")
         items = []
         for board in boards:
             if "母版" in board["name"]:
@@ -327,7 +326,6 @@ class CustomerServiceAgent:
     def _query_trello(self, query_type: str, keyword: str = "") -> str:
         try:
             items = self._scan_all_items()
-            print(f"[{AGENT_ID}] Trello scanned: {len(items)} items")
         except Exception as e:
             print(f"[{AGENT_ID}] Trello error: {e}")
             return f"查詢 Trello 失敗：{e}"
