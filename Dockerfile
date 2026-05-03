@@ -6,9 +6,14 @@ LABEL org.opencontainers.image.description="LINE customer service bot for 意念
 WORKDIR /app
 
 COPY trello_line_notifier.py linebot_server.py gantt_generator.py ./
+COPY shared/ ./shared/
+COPY agents/ ./agents/
+COPY gateway/ ./gateway/
 
-RUN pip install --no-cache-dir requests flask anthropic psycopg2-binary
+RUN pip install --no-cache-dir requests flask anthropic psycopg2-binary "paho-mqtt>=2.0"
 
-# 兩種執行模式（由 k8s workload 的 command 指定）：
-#   Webhook server:  python /app/linebot_server.py
+# 執行模式（由 k8s workload 的 command 指定）：
+#   LINE Gateway:    python /app/gateway/line_gateway.py
+#   Customer Agent:  python /app/agents/customer_service.py
 #   CronJob:         python /app/trello_line_notifier.py [morning|noon|evening]
+#   Legacy server:   python /app/linebot_server.py  (過渡期保留)
