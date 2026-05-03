@@ -11,11 +11,8 @@ import logging
 import time
 from datetime import datetime, date
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(message)s",
-    datefmt="%H:%M:%S",
-)
+from shared.log import setup as _setup_log
+_setup_log()
 log = logging.getLogger(__name__)
 
 from agents.base.memory import AgentMemory
