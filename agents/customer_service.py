@@ -36,7 +36,7 @@ INBOX_TOPIC = f"agents/{AGENT_ID}/inbox"
 OUTBOX_TOPIC = "gateway/outbox"
 TRELLO_REQUEST_TOPIC = "agents/trello/requests"
 TRELLO_REPLY_PREFIX = "agents/trello/responses"
-TRELLO_TIMEOUT = 15  # 秒
+TRELLO_TIMEOUT = 30  # 秒
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
