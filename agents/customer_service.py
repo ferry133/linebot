@@ -200,7 +200,7 @@ class CustomerServiceAgent:
                 messages=history + new_messages,
                 tools=TOOLS,
             )
-            new_messages.append({"role": "assistant", "content": response.content})
+            new_messages.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
 
             if response.stop_reason == "end_turn":
                 for block in response.content:

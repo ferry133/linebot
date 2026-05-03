@@ -380,7 +380,7 @@ def ask_claude(user_id: str, user_message: str) -> str:
             tools=TOOLS,
         )
 
-        new_messages.append({"role": "assistant", "content": response.content})
+        new_messages.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
 
         if response.stop_reason == "end_turn":
             for block in response.content:
