@@ -8,33 +8,30 @@ Perceive → Recall → Reason+Act → Reflect
 → Claude agentic loop（query_trello / escalate_to_manager）
 → 發布回覆至 gateway/outbox
 → reflect() 寫入 episodes + knowledge
+
+Trello 查詢委託給 TrelloAgent（MQTT request/reply）
 """
 
 import os
-import time
-from datetime import datetime, date
+import threading
+import uuid
+from datetime import datetime
 
 import anthropic
 
 from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
-from trello_line_notifier import (
-    TAIPEI,
-    get_boards,
-    get_lists,
-    get_cards,
-    parse_tag,
-    days_diff,
-    send_line,
-)
+from trello_line_notifier import TAIPEI, send_line
 
 AGENT_ID = "customer_service"
 INBOX_TOPIC = f"agents/{AGENT_ID}/inbox"
 OUTBOX_TOPIC = "gateway/outbox"
+TRELLO_REQUEST_TOPIC = "agents/trello/requests"
+TRELLO_REPLY_PREFIX = "agents/trello/responses"
+TRELLO_TIMEOUT = 15  # 秒
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
-TRELLO_CACHE_TTL = 60
 
 LINE_NOTIFY_GROUP_ID = os.environ.get("LINE_NOTIFY_GROUP_ID", "")
 
@@ -110,7 +107,7 @@ class CustomerServiceAgent:
         self.broker = broker
         self.memory = AgentMemory(AGENT_ID)
         self.client = anthropic.Anthropic()
-        self._trello_cache: dict = {"items": None, "ts": 0.0}
+        self._pending: dict[str, tuple[threading.Event, list]] = {}
 
     def start(self):
         self.broker.subscribe(INBOX_TOPIC, self._on_message)
@@ -140,19 +137,11 @@ class CustomerServiceAgent:
     # ── 五步循環 ──────────────────────────────────────────────────────────────
 
     def _run(self, user_id: str, user_message: str) -> str:
-        # 1. Perceive
         situation = self._perceive(user_id, user_message)
-
-        # 2. Recall
         memory_context = self._recall(situation)
-
-        # 3. Reason + Act
         result = self._reason_and_act(user_id, user_message, memory_context)
-
-        # 4. Reflect
         self._reflect(situation, result)
 
-        # 5. Reply
         if result.escalated and not result.final_text:
             return "您好，您的問題已轉交給專人處理，我們會盡快與您聯繫，感謝您的耐心等候！"
         return result.final_text[:5000] if result.final_text else "抱歉，目前無法處理您的問題，已通知專人跟進。"
@@ -175,9 +164,8 @@ class CustomerServiceAgent:
                 for e in episodes
             ))
         if parts:
-            context = "\n\n".join(parts)
             print(f"[{AGENT_ID}] Recalled: {len(knowledge)} knowledge, {len(episodes)} episodes")
-            return context
+            return "\n\n".join(parts)
         return ""
 
     def _reason_and_act(self, user_id: str, user_message: str,
@@ -239,11 +227,7 @@ class CustomerServiceAgent:
                 break
 
         self.memory.append_working(user_id, new_messages)
-        return ActionResult(
-            final_text=final_text,
-            escalated=escalated,
-            tools_used=tools_used,
-        )
+        return ActionResult(final_text=final_text, escalated=escalated, tools_used=tools_used)
 
     def _reflect(self, situation: str, result: ActionResult):
         quality = self._evaluate(result)
@@ -257,7 +241,6 @@ class CustomerServiceAgent:
         )
         print(f"[{AGENT_ID}] Reflected: quality={quality:.1f}, tools={result.tools_used}")
 
-        # 提煉語意知識
         if quality >= 0.8 and result.tools_used:
             insight = f"問題「{situation[:40]}」使用 {result.tools_used} 成功解答"
             self.memory.store_knowledge(insight, confidence=quality)
@@ -269,110 +252,37 @@ class CustomerServiceAgent:
             self.memory.store_knowledge(f"避免：{insight}", confidence=0.8)
 
     def _evaluate(self, result: ActionResult) -> float:
-        if result.error:
-            return 0.1
-        if result.escalated:
-            return 0.5
-        if len(result.final_text) > 100:
-            return 0.8
-        if len(result.final_text) > 20:
-            return 0.6
+        if result.error:     return 0.1
+        if result.escalated: return 0.5
+        if len(result.final_text) > 100: return 0.8
+        if len(result.final_text) > 20:  return 0.6
         return 0.3
 
-    # ── Trello ────────────────────────────────────────────────────────────────
-
-    def _scan_all_items(self) -> list[dict]:
-        now = time.monotonic()
-        if (self._trello_cache["items"] is not None
-                and now - self._trello_cache["ts"] < TRELLO_CACHE_TTL):
-            return list(self._trello_cache["items"])
-
-        boards = get_boards()
-        items = []
-        for board in boards:
-            if "母版" in board["name"]:
-                continue
-            list_map = get_lists(board["id"])
-            cards = get_cards(board["id"])
-            for card in cards:
-                list_name = list_map.get(card.get("idList", ""), "")
-                if card.get("desc"):
-                    parsed = parse_tag(card["desc"].split("\n")[0])
-                    if parsed:
-                        names, start, end, end_time, label = parsed
-                        items.append({
-                            "board": board["name"], "list": list_name,
-                            "card": card["name"], "label": label or card["name"],
-                            "names": names, "start": str(start), "end": str(end),
-                            "source": "card_desc",
-                        })
-                for cl in card.get("checklists", []):
-                    for item in cl.get("checkItems", []):
-                        parsed = parse_tag(item["name"])
-                        if not parsed:
-                            continue
-                        names, start, end, end_time, label = parsed
-                        items.append({
-                            "board": board["name"], "list": list_name,
-                            "card": card["name"], "label": label,
-                            "names": names, "start": str(start), "end": str(end),
-                            "state": item["state"], "source": "checklist",
-                        })
-
-        self._trello_cache["items"] = items
-        self._trello_cache["ts"] = time.monotonic()
-        return items
+    # ── Trello（委託 TrelloAgent via MQTT）────────────────────────────────────
 
     def _query_trello(self, query_type: str, keyword: str = "") -> str:
-        try:
-            items = self._scan_all_items()
-        except Exception as e:
-            print(f"[{AGENT_ID}] Trello error: {e}")
-            return f"查詢 Trello 失敗：{e}"
+        request_id = str(uuid.uuid4())
+        reply_topic = f"{TRELLO_REPLY_PREFIX}/{request_id}"
 
-        if not items:
-            return "目前 Trello 無任何有標記的工項。"
+        event = threading.Event()
+        result = [None]
 
-        if query_type == "overdue":
-            filtered = [
-                i for i in items
-                if i["end"] != "None" and i.get("state") != "complete"
-                and days_diff(date.fromisoformat(i["end"])) < 0
-            ]
-            label = "逾期工項"
-        elif query_type == "upcoming":
-            filtered = [
-                i for i in items
-                if i["end"] != "None" and i.get("state") != "complete"
-                and 0 <= days_diff(date.fromisoformat(i["end"])) <= 7
-            ]
-            label = "7 天內到期工項"
-        elif query_type == "specific" and keyword:
-            kw = keyword.lower()
-            filtered = [
-                i for i in items
-                if kw in i["board"].lower() or kw in i["card"].lower()
-                or kw in i["label"].lower() or any(kw in n for n in i["names"])
-            ]
-            label = f"關鍵字「{keyword}」相關工項"
-        else:
-            filtered = items
-            label = "所有工項"
+        def on_reply(payload: dict):
+            result[0] = payload.get("result", "查詢失敗")
+            event.set()
 
-        if not filtered:
-            return f"查無{label}。"
+        self.broker.subscribe(reply_topic, on_reply)
+        self.broker.publish(TRELLO_REQUEST_TOPIC, {
+            "request_id": request_id,
+            "reply_to": reply_topic,
+            "query_type": query_type,
+            "keyword": keyword,
+        })
 
-        now = datetime.now(TAIPEI).strftime("%Y/%m/%d %H:%M")
-        lines = [f"📋 {label}（查詢時間：{now}，共 {len(filtered)} 項）\n"]
-        for i in filtered:
-            state_str = " ✓" if i.get("state") == "complete" else (
-                " ⬜" if i.get("state") == "incomplete" else "")
-            end_str = f"，到期：{i['end']}" if i["end"] != "None" else ""
-            lines.append(
-                f"・{i['board']} / {i['list']} / {i['card']}\n"
-                f"  {i['label']}{state_str}{end_str}"
-            )
-        return "\n".join(lines)
+        if event.wait(timeout=TRELLO_TIMEOUT):
+            return result[0]
+        print(f"[{AGENT_ID}] Trello request {request_id[:8]} timed out")
+        return "查詢 Trello 逾時，請稍後再試。"
 
     # ── Escalation ────────────────────────────────────────────────────────────
 
