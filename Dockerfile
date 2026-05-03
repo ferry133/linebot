@@ -4,6 +4,7 @@ LABEL org.opencontainers.image.source="https://github.com/ferry133/linebot"
 LABEL org.opencontainers.image.description="LINE customer service bot for 意念情境室內裝修"
 
 WORKDIR /app
+ENV PYTHONPATH=/app
 
 COPY trello_line_notifier.py linebot_server.py gantt_generator.py ./
 COPY shared/ ./shared/
