@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Customer Service Agent
+Customer Service Agent — 五步循環
+
+Perceive → Recall → Reason+Act → Reflect
 
 訂閱 MQTT agents/customer_service/inbox
 → Claude agentic loop（query_trello / escalate_to_manager）
 → 發布回覆至 gateway/outbox
+→ reflect() 寫入 episodes + knowledge
 """
 
 import os
@@ -14,7 +17,6 @@ from datetime import datetime, date
 import anthropic
 
 from agents.base.memory import AgentMemory
-from agents.base.message import AgentMessage
 from shared.broker import MQTTBroker
 from trello_line_notifier import (
     TAIPEI,
@@ -94,6 +96,15 @@ TOOLS = [
 ]
 
 
+class ActionResult:
+    def __init__(self, final_text: str = "", escalated: bool = False,
+                 error: str = "", tools_used: list = None):
+        self.final_text = final_text
+        self.escalated = escalated
+        self.error = error
+        self.tools_used = tools_used or []
+
+
 class CustomerServiceAgent:
     def __init__(self, broker: MQTTBroker):
         self.broker = broker
@@ -112,33 +123,80 @@ class CustomerServiceAgent:
         text = payload.get("text", "")
         if not text:
             return
-        print(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:50]}")
+        print(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         try:
-            reply = self._process(user_id, text)
+            reply = self._run(user_id, text)
             self.broker.publish(OUTBOX_TOPIC, {
                 "user_id": user_id,
                 "content": reply,
             })
         except Exception as e:
-            print(f"[{AGENT_ID}] Error processing {user_id[:8]}: {e}")
+            print(f"[{AGENT_ID}] Error: {e}")
             self.broker.publish(OUTBOX_TOPIC, {
                 "user_id": user_id,
                 "content": "抱歉，系統暫時異常，請稍後再試。",
             })
 
-    # ── Claude agentic loop ───────────────────────────────────────────────────
+    # ── 五步循環 ──────────────────────────────────────────────────────────────
 
-    def _process(self, user_id: str, user_message: str) -> str:
+    def _run(self, user_id: str, user_message: str) -> str:
+        # 1. Perceive
+        situation = self._perceive(user_id, user_message)
+
+        # 2. Recall
+        memory_context = self._recall(situation)
+
+        # 3. Reason + Act
+        result = self._reason_and_act(user_id, user_message, memory_context)
+
+        # 4. Reflect
+        self._reflect(situation, result)
+
+        # 5. Reply
+        if result.escalated and not result.final_text:
+            return "您好，您的問題已轉交給專人處理，我們會盡快與您聯繫，感謝您的耐心等候！"
+        return result.final_text[:5000] if result.final_text else "抱歉，目前無法處理您的問題，已通知專人跟進。"
+
+    def _perceive(self, user_id: str, text: str) -> str:
+        return f"用戶訊息：{text}"
+
+    def _recall(self, situation: str) -> str:
+        knowledge = self.memory.get_knowledge(situation)
+        episodes = self.memory.recall_episodes(situation)
+        parts = []
+        if knowledge:
+            parts.append("【已知規律】\n" + "\n".join(
+                f"・{k['fact']}（信心：{k['confidence']:.0%}）"
+                for k in knowledge
+            ))
+        if episodes:
+            parts.append("【過去經驗】\n" + "\n".join(
+                f"・{e['situation'][:50]}... → {'✓ 成功' if e['quality'] > 0.7 else '✗ 待改進'}"
+                for e in episodes
+            ))
+        if parts:
+            context = "\n\n".join(parts)
+            print(f"[{AGENT_ID}] Recalled: {len(knowledge)} knowledge, {len(episodes)} episodes")
+            return context
+        return ""
+
+    def _reason_and_act(self, user_id: str, user_message: str,
+                        memory_context: str) -> ActionResult:
+        system = SYSTEM_PROMPT
+        if memory_context:
+            system += f"\n\n{memory_context}"
+
         history = self.memory.get_working(user_id)
         new_messages = [{"role": "user", "content": user_message}]
         escalated = False
         final_text = ""
+        tools_used = []
 
         for _ in range(MAX_TOOL_TURNS):
             response = self.client.messages.create(
                 model=MODEL,
                 max_tokens=1024,
-                system=SYSTEM_PROMPT,
+                system=system,
                 messages=history + new_messages,
                 tools=TOOLS,
             )
@@ -155,6 +213,7 @@ class CustomerServiceAgent:
                 for block in response.content:
                     if block.type != "tool_use":
                         continue
+                    tools_used.append(block.name)
                     if block.name == "query_trello":
                         result = self._query_trello(
                             block.input.get("query_type", "all"),
@@ -180,12 +239,45 @@ class CustomerServiceAgent:
                 break
 
         self.memory.append_working(user_id, new_messages)
+        return ActionResult(
+            final_text=final_text,
+            escalated=escalated,
+            tools_used=tools_used,
+        )
 
-        if escalated and not final_text:
-            final_text = "您好，您的問題已轉交給專人處理，我們會盡快與您聯繫，感謝您的耐心等候！"
+    def _reflect(self, situation: str, result: ActionResult):
+        quality = self._evaluate(result)
+        action_summary = f"工具：{result.tools_used}" if result.tools_used else "直接回答"
 
-        return (final_text[:5000] if final_text
-                else "抱歉，目前無法處理您的問題，已通知專人跟進。")
+        self.memory.store_episode(
+            situation=situation,
+            action=action_summary,
+            result=result.final_text[:200] if result.final_text else f"escalated={result.escalated}",
+            quality=quality,
+        )
+        print(f"[{AGENT_ID}] Reflected: quality={quality:.1f}, tools={result.tools_used}")
+
+        # 提煉語意知識
+        if quality >= 0.8 and result.tools_used:
+            insight = f"問題「{situation[:40]}」使用 {result.tools_used} 成功解答"
+            self.memory.store_knowledge(insight, confidence=quality)
+        elif result.escalated:
+            insight = f"問題「{situation[:40]}」需要人工處理"
+            self.memory.store_knowledge(insight, confidence=0.7)
+        elif result.error:
+            insight = f"問題「{situation[:40]}」處理失敗：{result.error[:50]}"
+            self.memory.store_knowledge(f"避免：{insight}", confidence=0.8)
+
+    def _evaluate(self, result: ActionResult) -> float:
+        if result.error:
+            return 0.1
+        if result.escalated:
+            return 0.5
+        if len(result.final_text) > 100:
+            return 0.8
+        if len(result.final_text) > 20:
+            return 0.6
+        return 0.3
 
     # ── Trello ────────────────────────────────────────────────────────────────
 
