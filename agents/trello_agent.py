@@ -21,8 +21,7 @@ from shared.broker import MQTTBroker
 from trello_line_notifier import (
     TAIPEI,
     get_boards,
-    get_lists,
-    get_cards,
+    get_boards_batch,
     parse_tag,
     days_diff,
 )
@@ -83,39 +82,43 @@ class TrelloAgent:
                 and now - self._cache["ts"] < TRELLO_CACHE_TTL):
             return list(self._cache["items"])
 
-        boards = self._get_target_boards()
+        target = self._get_target_boards()
+        board_ids = [b["id"] for b in target]
+        # name lookup for fallback (when _target_ids not set, _get_target_boards already has names)
+        name_map = {b["id"]: b["name"] for b in target}
+
+        boards_data = get_boards_batch(board_ids)
         items = []
-        for board in boards:
-            list_map = get_lists(board["id"])
-            cards = get_cards(board["id"])
-            for card in cards:
-                list_name = list_map.get(card.get("idList", ""), "")
+        for board in boards_data:
+            board_name = name_map.get(board["id"], board["name"])
+            for card in board["cards"]:
+                list_name = board["lists"].get(card.get("idList", ""), "")
                 if card.get("desc"):
                     parsed = parse_tag(card["desc"].split("\n")[0])
                     if parsed:
                         names, start, end, end_time, label = parsed
                         items.append({
-                            "board": board["name"], "list": list_name,
+                            "board": board_name, "list": list_name,
                             "card": card["name"], "label": label or card["name"],
                             "names": names, "start": str(start), "end": str(end),
                             "source": "card_desc",
                         })
                 for cl in card.get("checklists", []):
-                    for item in cl.get("checkItems", []):
-                        parsed = parse_tag(item["name"])
+                    for it in cl.get("checkItems", []):
+                        parsed = parse_tag(it["name"])
                         if not parsed:
                             continue
                         names, start, end, end_time, label = parsed
                         items.append({
-                            "board": board["name"], "list": list_name,
+                            "board": board_name, "list": list_name,
                             "card": card["name"], "label": label,
                             "names": names, "start": str(start), "end": str(end),
-                            "state": item["state"], "source": "checklist",
+                            "state": it["state"], "source": "checklist",
                         })
 
         self._cache["items"] = items
         self._cache["ts"] = time.monotonic()
-        log.info(f"[{AGENT_ID}] Scanned {len(items)} items from {len(boards)} boards")
+        log.info(f"[{AGENT_ID}] Scanned {len(items)} items from {len(boards_data)} boards")
         return items
 
     def _query(self, query_type: str, keyword: str = "") -> str:

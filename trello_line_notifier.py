@@ -75,6 +75,72 @@ def get_cards(board_id):
     return resp.json()
 
 
+def get_board_full(board_id: str) -> dict:
+    """Single call: returns {lists: {id: name}, cards: [...]} for one board."""
+    url = f"https://api.trello.com/1/boards/{board_id}"
+    params = {
+        "key": TRELLO_KEY,
+        "token": TRELLO_TOKEN,
+        "lists": "open",
+        "list_fields": "name",
+        "cards": "open",
+        "card_fields": "name,desc,dateLastActivity,idList",
+        "checklists": "all",
+        "checklist_fields": "name",
+        "fields": "name",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    # attach checklists to cards (same structure as get_cards)
+    cl_map: dict[str, list] = {}
+    for cl in data.get("checklists", []):
+        cl_map.setdefault(cl["idCard"], []).append(cl)
+    for card in data.get("cards", []):
+        card["checklists"] = cl_map.get(card["id"], [])
+    return {
+        "lists": {lst["id"]: lst["name"] for lst in data.get("lists", [])},
+        "cards": data.get("cards", []),
+    }
+
+
+def get_boards_batch(board_ids: list[str]) -> list[dict]:
+    """Batch fetch up to 10 boards per HTTP request using /1/batch.
+    Returns list of {id, name, lists, cards} dicts in the same order."""
+    BATCH_SIZE = 10
+    results: list[dict] = []
+    card_params = (
+        "lists=open&list_fields=name"
+        "&cards=open&card_fields=name,desc,dateLastActivity,idList"
+        "&checklists=all&checklist_fields=name&fields=name"
+    )
+    for i in range(0, len(board_ids), BATCH_SIZE):
+        chunk = board_ids[i:i + BATCH_SIZE]
+        urls = ",".join(f"/1/boards/{bid}?{card_params}" for bid in chunk)
+        resp = requests.get(
+            "https://api.trello.com/1/batch",
+            params={"key": TRELLO_KEY, "token": TRELLO_TOKEN, "urls": urls},
+        )
+        resp.raise_for_status()
+        for bid, item in zip(chunk, resp.json()):
+            # batch response wraps each result in {"200": <body>} or {"code": <err>}
+            body = item.get("200") if isinstance(item, dict) else None
+            if not body:
+                continue
+            cl_map: dict[str, list] = {}
+            for cl in body.get("checklists", []):
+                cl_map.setdefault(cl["idCard"], []).append(cl)
+            for card in body.get("cards", []):
+                card["checklists"] = cl_map.get(card["id"], [])
+            results.append({
+                "id": bid,
+                "name": body.get("name", bid),
+                "lists": {lst["id"]: lst["name"] for lst in body.get("lists", [])},
+                "cards": body.get("cards", []),
+            })
+    return results
+
+
 ITEM_RE = re.compile(
     r"\[@((?:@?\([^)]+\))+),(\d{8})?-?(\d{8})?(?::(\d{4}))?\](.*)"
 )
