@@ -12,10 +12,18 @@ Perceive → Recall → Reason+Act → Reflect
 Trello 查詢委託給 TrelloAgent（MQTT request/reply）
 """
 
+import logging
 import os
 import threading
 import uuid
 from datetime import datetime
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 import anthropic
 
@@ -112,7 +120,7 @@ class CustomerServiceAgent:
     def start(self):
         self.broker.subscribe(INBOX_TOPIC, self._on_message)
         self.broker.subscribe(f"{TRELLO_REPLY_PREFIX}/#", self._on_trello_reply)
-        print(f"[{AGENT_ID}] Listening on {INBOX_TOPIC}")
+        log.info(f"[{AGENT_ID}] Listening on {INBOX_TOPIC}")
 
     # ── MQTT handler ──────────────────────────────────────────────────────────
 
@@ -121,7 +129,7 @@ class CustomerServiceAgent:
         text = payload.get("text", "")
         if not text:
             return
-        print(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
+        log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
         threading.Thread(target=self._process, args=(user_id, text), daemon=True).start()
 
@@ -133,7 +141,7 @@ class CustomerServiceAgent:
                 "content": reply,
             })
         except Exception as e:
-            print(f"[{AGENT_ID}] Error: {e}")
+            log.info(f"[{AGENT_ID}] Error: {e}")
             self.broker.publish(OUTBOX_TOPIC, {
                 "user_id": user_id,
                 "content": "抱歉，系統暫時異常，請稍後再試。",
@@ -169,7 +177,7 @@ class CustomerServiceAgent:
                 for e in episodes
             ))
         if parts:
-            print(f"[{AGENT_ID}] Recalled: {len(knowledge)} knowledge, {len(episodes)} episodes")
+            log.info(f"[{AGENT_ID}] Recalled: {len(knowledge)} knowledge, {len(episodes)} episodes")
             return "\n\n".join(parts)
         return ""
 
@@ -244,7 +252,7 @@ class CustomerServiceAgent:
             result=result.final_text[:200] if result.final_text else f"escalated={result.escalated}",
             quality=quality,
         )
-        print(f"[{AGENT_ID}] Reflected: quality={quality:.1f}, tools={result.tools_used}")
+        log.info(f"[{AGENT_ID}] Reflected: quality={quality:.1f}, tools={result.tools_used}")
 
         if quality >= 0.8 and result.tools_used:
             insight = f"問題「{situation[:40]}」使用 {result.tools_used} 成功解答"
@@ -290,7 +298,7 @@ class CustomerServiceAgent:
         try:
             if event.wait(timeout=TRELLO_TIMEOUT):
                 return result[0]
-            print(f"[{AGENT_ID}] Trello request {request_id[:8]} timed out")
+            log.info(f"[{AGENT_ID}] Trello request {request_id[:8]} timed out")
             return "查詢 Trello 逾時，請稍後再試。"
         finally:
             self._pending.pop(request_id, None)
@@ -325,5 +333,5 @@ if __name__ == "__main__":
     agent = CustomerServiceAgent(broker)
     broker.connect()
     agent.start()
-    print(f"[{AGENT_ID}] Agent running...")
+    log.info(f"[{AGENT_ID}] Agent running...")
     broker.loop_forever()

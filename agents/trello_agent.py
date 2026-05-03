@@ -7,8 +7,16 @@ Trello Agent — 獨立 process
 → 發布結果至 payload 指定的 reply_to topic
 """
 
+import logging
 import time
 from datetime import datetime, date
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
@@ -34,7 +42,7 @@ class TrelloAgent:
 
     def start(self):
         self.broker.subscribe(REQUEST_TOPIC, self._on_request)
-        print(f"[{AGENT_ID}] Listening on {REQUEST_TOPIC}")
+        log.info(f"[{AGENT_ID}] Listening on {REQUEST_TOPIC}")
 
     def _on_request(self, payload: dict):
         request_id = payload.get("request_id", "")
@@ -43,10 +51,10 @@ class TrelloAgent:
         keyword = payload.get("keyword", "")
 
         if not reply_to:
-            print(f"[{AGENT_ID}] Missing reply_to in request {request_id}")
+            log.info(f"[{AGENT_ID}] Missing reply_to in request {request_id}")
             return
 
-        print(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword}")
+        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword}")
         result = self._query(query_type, keyword)
         self.broker.publish(reply_to, {
             "request_id": request_id,
@@ -93,14 +101,14 @@ class TrelloAgent:
 
         self._cache["items"] = items
         self._cache["ts"] = time.monotonic()
-        print(f"[{AGENT_ID}] Scanned {len(items)} items from {len(boards)} boards")
+        log.info(f"[{AGENT_ID}] Scanned {len(items)} items from {len(boards)} boards")
         return items
 
     def _query(self, query_type: str, keyword: str = "") -> str:
         try:
             items = self._scan_all_items()
         except Exception as e:
-            print(f"[{AGENT_ID}] Trello error: {e}")
+            log.info(f"[{AGENT_ID}] Trello error: {e}")
             return f"查詢 Trello 失敗：{e}"
 
         if not items:
@@ -153,5 +161,5 @@ if __name__ == "__main__":
     agent = TrelloAgent(broker)
     broker.connect()
     agent.start()
-    print(f"[{AGENT_ID}] Agent running...")
+    log.info(f"[{AGENT_ID}] Agent running...")
     broker.loop_forever()
