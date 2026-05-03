@@ -122,6 +122,10 @@ class CustomerServiceAgent:
         if not text:
             return
         print(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
+        # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
+        threading.Thread(target=self._process, args=(user_id, text), daemon=True).start()
+
+    def _process(self, user_id: str, text: str):
         try:
             reply = self._run(user_id, text)
             self.broker.publish(OUTBOX_TOPIC, {
