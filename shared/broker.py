@@ -1,4 +1,4 @@
-"""MQTT wrapper around paho-mqtt.
+"""MQTT wrapper around paho-mqtt v2.
 
 Usage:
     broker = MQTTBroker()
@@ -21,7 +21,11 @@ MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 
 class MQTTBroker:
     def __init__(self, client_id: str = ""):
-        self._client = mqtt.Client(client_id=client_id)
+        self._client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION1,
+            client_id=client_id,
+        )
+        self._client.reconnect_delay_set(min_delay=1, max_delay=30)
         self._handlers: dict[str, Callable] = {}
         self._connected = threading.Event()
 
@@ -41,7 +45,7 @@ class MQTTBroker:
         self._client.publish(topic, json.dumps(payload, ensure_ascii=False))
 
     def loop_forever(self):
-        self._client.loop_forever()
+        self._client.loop_forever(retry_first_connection=True)
 
     def loop_start(self):
         self._client.loop_start()
@@ -58,7 +62,8 @@ class MQTTBroker:
 
     def _on_disconnect(self, client, userdata, rc):
         self._connected.clear()
-        print(f"[MQTT] Disconnected rc={rc}")
+        if rc != 0:
+            print(f"[MQTT] Unexpected disconnect rc={rc}, reconnecting...")
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
@@ -73,8 +78,6 @@ class MQTTBroker:
                 handler(payload)
             except Exception as e:
                 print(f"[MQTT] Handler error on {topic}: {e}")
-        else:
-            print(f"[MQTT] No handler for topic: {topic}")
 
     def _match_wildcard(self, topic: str):
         for pattern, handler in self._handlers.items():
