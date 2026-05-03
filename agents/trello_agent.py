@@ -8,6 +8,7 @@ Trello Agent — 獨立 process
 """
 
 import logging
+import os
 import time
 from datetime import datetime, date
 
@@ -30,12 +31,19 @@ AGENT_ID = "trello_agent"
 REQUEST_TOPIC = "agents/trello/requests"
 TRELLO_CACHE_TTL = 60
 
+# Comma-separated board IDs to monitor (e.g. "abc123,def456").
+# If set, get_boards() is skipped entirely — much faster cold scan.
+_BOARD_IDS_ENV = os.environ.get("TRELLO_BOARD_IDS", "")
+
 
 class TrelloAgent:
     def __init__(self, broker: MQTTBroker):
         self.broker = broker
         self.memory = AgentMemory(AGENT_ID)
         self._cache: dict = {"items": None, "ts": 0.0}
+        # id → name, populated once from get_boards() when TRELLO_BOARD_IDS is set
+        self._board_names: dict[str, str] = {}
+        self._target_ids: list[str] = [b.strip() for b in _BOARD_IDS_ENV.split(",") if b.strip()]
 
     def start(self):
         self.broker.subscribe(REQUEST_TOPIC, self._on_request)
@@ -58,17 +66,24 @@ class TrelloAgent:
             "result": result,
         })
 
+    def _get_target_boards(self) -> list[dict]:
+        if self._target_ids:
+            if not self._board_names:
+                for b in get_boards():
+                    self._board_names[b["id"]] = b["name"]
+            return [{"id": bid, "name": self._board_names.get(bid, bid)}
+                    for bid in self._target_ids]
+        return [b for b in get_boards() if "母版" not in b["name"]]
+
     def _scan_all_items(self) -> list[dict]:
         now = time.monotonic()
         if (self._cache["items"] is not None
                 and now - self._cache["ts"] < TRELLO_CACHE_TTL):
             return list(self._cache["items"])
 
-        boards = get_boards()
+        boards = self._get_target_boards()
         items = []
         for board in boards:
-            if "母版" in board["name"]:
-                continue
             list_map = get_lists(board["id"])
             cards = get_cards(board["id"])
             for card in cards:
