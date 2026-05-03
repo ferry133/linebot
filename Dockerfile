@@ -5,6 +5,7 @@ LABEL org.opencontainers.image.description="LINE customer service bot for 意念
 
 WORKDIR /app
 ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 COPY trello_line_notifier.py linebot_server.py gantt_generator.py ./
 COPY shared/ ./shared/
