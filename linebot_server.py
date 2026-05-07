@@ -48,6 +48,23 @@ MAX_TOOL_TURNS = 5  # agentic loop 最多輪次
 MAX_USERS = 500     # _history LRU 上限；超過時淘汰最久未使用的 user
 TRELLO_CACHE_TTL = 60  # 秒；Trello 全掃描結果的快取時間
 
+# ── 知識庫載入 ────────────────────────────────────────────────────────────────
+def _load_knowledge_base() -> str:
+    kb_dir = os.path.join(os.path.dirname(__file__), "knowledge")
+    if not os.path.isdir(kb_dir):
+        return ""
+    parts = []
+    for fname in sorted(os.listdir(kb_dir)):
+        if fname.endswith(".md"):
+            try:
+                with open(os.path.join(kb_dir, fname), encoding="utf-8") as f:
+                    parts.append(f.read())
+            except OSError:
+                pass
+    return "\n\n---\n\n".join(parts)
+
+_KNOWLEDGE_BASE = _load_knowledge_base()
+
 # ── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
 
@@ -70,7 +87,7 @@ SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
 - 不要編造工程進度或日期
 - 不要承諾具體報價金額（引導客戶預約現場勘查）
 - 不要提供個人資料或其他客戶資訊
-"""
+""" + (f"\n\n【室內裝修知識庫】\n以下是室內裝修相關知識，供你回答客戶諮詢時參考：\n\n{_KNOWLEDGE_BASE}" if _KNOWLEDGE_BASE else "")
 
 # ── 工具定義 ──────────────────────────────────────────────────────────────────
 TOOLS = [

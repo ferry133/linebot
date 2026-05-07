@@ -23,6 +23,7 @@ _setup_log()
 log = logging.getLogger(__name__)
 
 import anthropic
+import yaml
 
 from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
@@ -37,10 +38,37 @@ TRELLO_TIMEOUT = 30  # 秒
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
+KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge")
+
+
+def _load_knowledge_base() -> str:
+    if not os.path.isdir(KNOWLEDGE_DIR):
+        return ""
+    parts = []
+    for fname in sorted(os.listdir(KNOWLEDGE_DIR)):
+        if fname.endswith(".md"):
+            try:
+                with open(os.path.join(KNOWLEDGE_DIR, fname), encoding="utf-8") as f:
+                    parts.append(f.read())
+            except OSError:
+                pass
+    return "\n\n---\n\n".join(parts)
+
+
+def _load_project_photos() -> dict:
+    path = os.path.join(KNOWLEDGE_DIR, "project_photos.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except OSError:
+        return {}
+
+
+_KNOWLEDGE_BASE = _load_knowledge_base()
 
 LINE_NOTIFY_GROUP_ID = os.environ.get("LINE_NOTIFY_GROUP_ID", "")
 
-SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
+_BASE_SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
 
 【公司簡介】
 意念情境室內裝修提供住宅與商業空間的設計、施工與監工服務，服務範圍包含全室裝修、局部改造、木作工程、水電配管、地板磁磚等。
@@ -50,6 +78,7 @@ SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
 - 工程進度、各工班預計到場時間、工項排程
 - 費用說明、付款階段、付款狀態（從工程看板查詢）
 - 材料選樣、工期估算等一般諮詢
+- 客戶詢問工地照片時，使用 get_project_photos 工具取得相簿連結
 
 【回應原則】
 - 語氣親切、專業，使用繁體中文
@@ -62,6 +91,11 @@ SYSTEM_PROMPT = """你是「意念情境室內裝修」的 LINE 客服助理。
 - 不要承諾具體報價金額（引導客戶預約現場勘查）
 - 不要提供個人資料或其他客戶資訊
 """
+
+SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT + (
+    f"\n\n【室內裝修知識庫】\n以下是室內裝修相關知識，供你回答客戶諮詢時參考：\n\n{_KNOWLEDGE_BASE}"
+    if _KNOWLEDGE_BASE else ""
+)
 
 TOOLS = [
     {
@@ -81,6 +115,20 @@ TOOLS = [
                 },
             },
             "required": ["query_type"],
+        },
+    },
+    {
+        "name": "get_project_photos",
+        "description": "取得客戶工地的施工照片相簿連結。客戶詢問工地照片、施工現況照片時使用此工具。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_name": {
+                    "type": "string",
+                    "description": "工程名稱或客戶姓名關鍵字，用於比對對應的相簿",
+                },
+            },
+            "required": ["project_name"],
         },
     },
     {
@@ -217,6 +265,10 @@ class CustomerServiceAgent:
                             block.input.get("query_type", "all"),
                             block.input.get("keyword", ""),
                         )
+                    elif block.name == "get_project_photos":
+                        result = self._get_project_photos(
+                            block.input.get("project_name", ""),
+                        )
                     elif block.name == "escalate_to_manager":
                         self._escalate(
                             block.input.get("reason", ""),
@@ -299,6 +351,19 @@ class CustomerServiceAgent:
             return "查詢 Trello 逾時，請稍後再試。"
         finally:
             self._pending.pop(request_id, None)
+
+    # ── Project Photos ────────────────────────────────────────────────────────
+
+    def _get_project_photos(self, project_name: str) -> str:
+        photos = _load_project_photos()
+        if not photos:
+            return "目前尚未設定工地相簿，請聯繫專人取得照片。"
+        keyword = project_name.strip().lower()
+        for key, url in photos.items():
+            if keyword in key.lower() or key.lower() in keyword:
+                return f"相簿連結：{url}"
+        keys = "、".join(photos.keys())
+        return f"找不到「{project_name}」的相簿。目前有：{keys}"
 
     # ── Escalation ────────────────────────────────────────────────────────────
 
