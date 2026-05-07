@@ -42,17 +42,21 @@ KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowle
 
 
 def _load_knowledge_base() -> str:
-    if not os.path.isdir(KNOWLEDGE_DIR):
+    try:
+        if not os.path.isdir(KNOWLEDGE_DIR):
+            return ""
+        parts = []
+        for fname in sorted(os.listdir(KNOWLEDGE_DIR)):
+            if fname.endswith(".md"):
+                try:
+                    with open(os.path.join(KNOWLEDGE_DIR, fname), encoding="utf-8") as f:
+                        parts.append(f.read())
+                except OSError:
+                    pass
+        return "\n\n---\n\n".join(parts)
+    except OSError as e:
+        log.warning(f"Cannot load knowledge base: {e}")
         return ""
-    parts = []
-    for fname in sorted(os.listdir(KNOWLEDGE_DIR)):
-        if fname.endswith(".md"):
-            try:
-                with open(os.path.join(KNOWLEDGE_DIR, fname), encoding="utf-8") as f:
-                    parts.append(f.read())
-            except OSError:
-                pass
-    return "\n\n---\n\n".join(parts)
 
 
 def _load_project_photos() -> dict:
