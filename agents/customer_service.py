@@ -190,7 +190,7 @@ class CustomerServiceAgent:
                 "content": reply,
             })
         except Exception as e:
-            log.info(f"[{AGENT_ID}] Error: {e}")
+            log.exception(f"[{AGENT_ID}] Error processing message from {user_id[:8]}: {e}")
             self.broker.publish(OUTBOX_TOPIC, {
                 "user_id": user_id,
                 "content": "抱歉，系統暫時異常，請稍後再試。",
