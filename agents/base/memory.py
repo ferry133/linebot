@@ -16,6 +16,23 @@ MAX_HISTORY = 20
 MAX_USERS = 500
 
 
+def _safe_trim(messages: list, limit: int) -> list:
+    """截斷對話歷史，確保開頭不是孤立的 tool_result（避免 Anthropic 400）。"""
+    trimmed = messages[-limit:]
+    # 若第一條 user 訊息的 content 是 tool_result list，代表對應的 tool_use 被切掉了
+    # 持續丟棄開頭直到序列合法
+    while trimmed:
+        first = trimmed[0]
+        content = first.get("content", "")
+        if isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+        ):
+            trimmed = trimmed[1:]  # 丟掉這條孤立的 tool_result
+        else:
+            break
+    return trimmed
+
+
 class AgentMemory:
     def __init__(self, agent_id: str):
         self.agent_id = agent_id
@@ -60,7 +77,7 @@ class AgentMemory:
                     self._working.popitem(last=False)
                 entry = {"messages": []}
                 self._working[thread_id] = entry
-            entry["messages"] = (entry["messages"] + new_messages)[-MAX_HISTORY:]
+            entry["messages"] = _safe_trim(entry["messages"] + new_messages, MAX_HISTORY)
             updated = list(entry["messages"])
 
         def save(conn):
