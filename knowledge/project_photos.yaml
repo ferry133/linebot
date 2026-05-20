@@ -1,7 +1,0 @@
-# 工地相簿對照表
-# key: 工程名稱（可用客戶姓名或地址，Agent 用關鍵字模糊比對）
-# value: Synology Photos 共享連結
-#
-# 範例：
-# 王小明_信義路:  https://your-nas/photo/mo/sharing/xxxxxx
-# 陳大明_全室裝修: https://your-nas/photo/mo/sharing/yyyyyy
