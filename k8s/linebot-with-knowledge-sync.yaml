@@ -1,0 +1,150 @@
+# LINE bot with vault knowledge synced via git (sparse-checkout + auto-restart).
+#
+# Layout:
+#   initContainer "knowledge-clone" — sparse-clones only jia.homedesign/wiki/public
+#   sidecar       "knowledge-sync"  — pulls every 5 min; on new commit, restarts the bot
+#   main          "linebot"         — reads /app/knowledge
+#
+# Prereqs:
+#   1. Read-only deploy key on the vault repo:
+#      kubectl create secret generic vault-deploy-key \
+#        --from-file=ssh-privatekey=/path/to/deploy_key \
+#        --from-literal=known_hosts="$(ssh-keyscan github.com)"
+#   2. Replace VAULT_REPO_URL and image: refs below.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: linebot
+---
+# Sidecar needs to restart the bot container when knowledge changes.
+# Scoped to this single Deployment only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: linebot-restarter
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["linebot"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: linebot-restarter
+subjects:
+  - kind: ServiceAccount
+    name: linebot
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: linebot-restarter
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linebot
+  labels: { app: linebot }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: linebot }
+  template:
+    metadata:
+      labels: { app: linebot }
+    spec:
+      serviceAccountName: linebot
+      volumes:
+        - name: vault
+          emptyDir: {}
+        - name: ssh-key
+          secret:
+            secretName: vault-deploy-key
+            defaultMode: 0400
+
+      initContainers:
+        - name: knowledge-clone
+          image: alpine/git:2.45.2
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /root/.ssh
+              cp /etc/ssh-key/ssh-privatekey /root/.ssh/id_ed25519
+              cp /etc/ssh-key/known_hosts /root/.ssh/known_hosts
+              chmod 600 /root/.ssh/id_ed25519
+              # sparse checkout: only fetch the bot's knowledge subtree
+              git clone --filter=blob:none --no-checkout --depth=1 \
+                "$VAULT_REPO_URL" /vault
+              cd /vault
+              git sparse-checkout init --cone
+              git sparse-checkout set jia.homedesign/wiki/public
+              git checkout
+          env:
+            - name: VAULT_REPO_URL
+              value: git@github.com:ferry133/larry-vault.git  # ← change me
+          volumeMounts:
+            - { name: vault, mountPath: /vault }
+            - { name: ssh-key, mountPath: /etc/ssh-key, readOnly: true }
+
+      containers:
+        - name: linebot
+          image: ghcr.io/ferry133/linebot:latest  # ← change me
+          env:
+            - name: KNOWLEDGE_DIR
+              value: /app/knowledge
+            # plus existing env: ANTHROPIC_API_KEY, LINE_*, MQTT_*, ...
+          volumeMounts:
+            - name: vault
+              mountPath: /app/knowledge
+              subPath: jia.homedesign/wiki/public
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/app/knowledge/01_service_process.md"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+
+        - name: knowledge-sync
+          # alpine/git + kubectl downloaded once at startup. For prod, bake a
+          # custom image with both pre-installed.
+          image: alpine/git:2.45.2
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /root/.ssh
+              cp /etc/ssh-key/ssh-privatekey /root/.ssh/id_ed25519
+              cp /etc/ssh-key/known_hosts /root/.ssh/known_hosts
+              chmod 600 /root/.ssh/id_ed25519
+              apk add --no-cache curl ca-certificates >/dev/null
+              KVER=$(curl -sL https://dl.k8s.io/release/stable.txt)
+              curl -sLO "https://dl.k8s.io/release/${KVER}/bin/linux/amd64/kubectl"
+              install -m 0755 kubectl /usr/local/bin/kubectl
+              cd /vault
+              LAST=$(git rev-parse HEAD)
+              while true; do
+                sleep 300
+                git pull --ff-only --quiet || { echo "[sync] pull failed"; continue; }
+                NOW=$(git rev-parse HEAD)
+                if [ "$NOW" != "$LAST" ]; then
+                  echo "[sync] knowledge updated $LAST → $NOW, restarting bot"
+                  kubectl rollout restart deployment/linebot -n "$NAMESPACE" || \
+                    echo "[sync] restart failed"
+                  LAST=$NOW
+                fi
+              done
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - { name: vault, mountPath: /vault }
+            - { name: ssh-key, mountPath: /etc/ssh-key, readOnly: true }
+          resources:
+            requests: { cpu: 10m,  memory: 32Mi }
+            limits:   { cpu: 100m, memory: 96Mi }
