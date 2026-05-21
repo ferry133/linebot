@@ -14,15 +14,19 @@ Trello 查詢委託給 TrelloAgent（MQTT request/reply）
 
 import logging
 import os
+import re
 import threading
 import uuid
 from datetime import datetime
+
+_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 
 from shared.log import setup as _setup_log
 _setup_log()
 log = logging.getLogger(__name__)
 
 import anthropic
+import json
 import yaml
 
 from agents.base.memory import AgentMemory
@@ -50,7 +54,7 @@ def _load_knowledge_base() -> str:
             if fname.endswith(".md"):
                 try:
                     with open(os.path.join(KNOWLEDGE_DIR, fname), encoding="utf-8") as f:
-                        parts.append(f.read())
+                        parts.append(_FRONTMATTER_RE.sub("", f.read(), count=1))
                 except OSError:
                     pass
         return "\n\n---\n\n".join(parts)
@@ -66,6 +70,27 @@ def _load_project_photos() -> dict:
             return yaml.safe_load(f) or {}
     except OSError:
         return {}
+
+
+def _load_user_permissions() -> dict:
+    """Return {line_id: {"name": name, "projects": "*" | [str]}}."""
+    path = os.path.join(KNOWLEDGE_DIR, "contacts.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError:
+        return {}
+    result = {}
+    for name, v in data.items():
+        if isinstance(v, dict):
+            line_id = v.get("line_id", "")
+            projects = v.get("projects", "*")
+        else:
+            line_id = v
+            projects = "*"
+        if line_id:
+            result[line_id] = {"name": name, "projects": projects}
+    return result
 
 
 _KNOWLEDGE_BASE = _load_knowledge_base()
@@ -268,6 +293,7 @@ class CustomerServiceAgent:
                         result = self._query_trello(
                             block.input.get("query_type", "all"),
                             block.input.get("keyword", ""),
+                            user_id=user_id,
                         )
                     elif block.name == "get_project_photos":
                         result = self._get_project_photos(
@@ -333,7 +359,22 @@ class CustomerServiceAgent:
             result[0] = payload.get("result", "查詢失敗")
             event.set()
 
-    def _query_trello(self, query_type: str, keyword: str = "") -> str:
+    def _get_allowed_boards(self, user_id: str) -> list[str] | None:
+        """None = no restriction, [] = blocked, [str] = allowed board names."""
+        perms = _load_user_permissions()
+        if not perms:
+            return None  # no config → no restriction
+        entry = perms.get(user_id)
+        if entry is None:
+            return []  # unknown user → blocked
+        projects = entry.get("projects", "*")
+        return None if projects == "*" else projects
+
+    def _query_trello(self, query_type: str, keyword: str = "", user_id: str = "") -> str:
+        allowed_boards = self._get_allowed_boards(user_id) if user_id else None
+        if allowed_boards is not None and len(allowed_boards) == 0:
+            return "您目前沒有工程查詢權限，如有需要請聯繫我們的服務人員。"
+
         request_id = str(uuid.uuid4())
         reply_topic = f"{TRELLO_REPLY_PREFIX}/{request_id}"
 
@@ -346,6 +387,7 @@ class CustomerServiceAgent:
             "reply_to": reply_topic,
             "query_type": query_type,
             "keyword": keyword,
+            "allowed_boards": allowed_boards,
         })
 
         try:

@@ -16,7 +16,8 @@ TRELLO_KEY = os.environ.get("TRELLO_API_KEY", "")
 TRELLO_TOKEN = os.environ.get("TRELLO_TOKEN", "")
 WORKSPACE_ID = "jiahomedesign1"
 
-CONTACTS_FILE = os.path.join(os.path.dirname(__file__), "line_contacts.json")
+_KNOWLEDGE_DIR = os.path.join(os.path.dirname(__file__), "knowledge")
+CONTACTS_FILE = os.path.join(_KNOWLEDGE_DIR, "contacts.json")
 
 # mode → 負責的條件
 # morning : #2 今日開始、#4 今日到期（時間未到）、#9 每日摘要
@@ -27,10 +28,21 @@ CONTACTS_FILE = os.path.join(os.path.dirname(__file__), "line_contacts.json")
 # board_name = "__summary__" 為每日摘要，不分組
 
 
-def load_contacts():
-    with open(CONTACTS_FILE, encoding="utf-8") as f:
-        data = json.load(f)
-    return {k.lower(): v for k, v in data.items() if v and not k.startswith("備")}
+def load_contacts() -> dict:
+    """Return {name_lower: line_id}. Supports both old {name: id} and new {name: {line_id, projects}} formats."""
+    try:
+        with open(CONTACTS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError:
+        return {}
+    result = {}
+    for k, v in data.items():
+        if k.startswith("備"):
+            continue
+        line_id = v.get("line_id", "") if isinstance(v, dict) else v
+        if line_id:
+            result[k.lower()] = line_id
+    return result
 
 
 def send_line(user_id, message):

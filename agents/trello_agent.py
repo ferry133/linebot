@@ -63,8 +63,9 @@ class TrelloAgent:
             log.info(f"[{AGENT_ID}] Missing reply_to in request {request_id}")
             return
 
-        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword}")
-        result = self._query(query_type, keyword)
+        allowed_boards = payload.get("allowed_boards", None)  # None=all, []=blocked, [str]=filter
+        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed={allowed_boards}")
+        result = self._query(query_type, keyword, allowed_boards)
         self.broker.publish(reply_to, {
             "request_id": request_id,
             "result": result,
@@ -123,12 +124,20 @@ class TrelloAgent:
         log.info(f"[{AGENT_ID}] Scanned {len(items)} items from {len(boards_data)} boards")
         return items
 
-    def _query(self, query_type: str, keyword: str = "") -> str:
+    def _query(self, query_type: str, keyword: str = "",
+               allowed_boards: list[str] | None = None) -> str:
         try:
             items = self._scan_all_items()
         except Exception as e:
             log.info(f"[{AGENT_ID}] Trello error: {e}")
             return f"查詢 Trello 失敗：{e}"
+
+        # Per-user board filtering (None = no restriction)
+        if allowed_boards is not None:
+            items = [i for i in items if any(
+                a.lower() in i["board"].lower() or i["board"].lower() in a.lower()
+                for a in allowed_boards
+            )]
 
         if not items:
             return "目前 Trello 無任何有標記的工項。"
