@@ -31,6 +31,7 @@ import yaml
 
 from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
+from shared.db import db_exec
 from trello_line_notifier import TAIPEI, send_line
 
 AGENT_ID = "customer_service"
@@ -72,25 +73,31 @@ def _load_project_photos() -> dict:
         return {}
 
 
-def _load_user_permissions() -> dict:
-    """Return {line_id: {"name": name, "projects": "*" | [str]}}."""
-    path = os.path.join(KNOWLEDGE_DIR, "contacts.json")
+def _get_user_role_and_projects(user_id: str) -> tuple:
+    """Return (role, projects) from DB. Defaults to ('visitor', []) on any error."""
+    def _query(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT role, projects FROM line_users WHERE line_id = %s",
+                (user_id,),
+            )
+            return cur.fetchone()
+
     try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except OSError:
-        return {}
-    result = {}
-    for name, v in data.items():
-        if isinstance(v, dict):
-            line_id = v.get("line_id", "")
-            projects = v.get("projects", "*")
-        else:
-            line_id = v
-            projects = "*"
-        if line_id:
-            result[line_id] = {"name": name, "projects": projects}
-    return result
+        row = db_exec(_query)
+    except Exception:
+        row = None
+
+    if row is None:
+        return "visitor", []
+    role = row["role"] if isinstance(row, dict) else row[0]
+    projects = row["projects"] if isinstance(row, dict) else row[1]
+    if isinstance(projects, str):
+        try:
+            projects = json.loads(projects)
+        except Exception:
+            projects = []
+    return role, (projects or [])
 
 
 _KNOWLEDGE_BASE = _load_knowledge_base()
@@ -359,16 +366,14 @@ class CustomerServiceAgent:
             result[0] = payload.get("result", "查詢失敗")
             event.set()
 
-    def _get_allowed_boards(self, user_id: str) -> list[str] | None:
+    def _get_allowed_boards(self, user_id: str):
         """None = no restriction, [] = blocked, [str] = allowed board names."""
-        perms = _load_user_permissions()
-        if not perms:
-            return None  # no config → no restriction
-        entry = perms.get(user_id)
-        if entry is None:
-            return []  # unknown user → blocked
-        projects = entry.get("projects", "*")
-        return None if projects == "*" else projects
+        role, projects = _get_user_role_and_projects(user_id)
+        if role in ("admin", "employee"):
+            return None
+        if role in ("vendor", "customer"):
+            return projects
+        return []  # visitor or unknown
 
     def _query_trello(self, query_type: str, keyword: str = "", user_id: str = "") -> str:
         allowed_boards = self._get_allowed_boards(user_id) if user_id else None

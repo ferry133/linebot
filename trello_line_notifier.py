@@ -3,6 +3,7 @@ import os
 import json
 import re
 import requests
+import sys
 from datetime import date, datetime
 try:
     from zoneinfo import ZoneInfo
@@ -19,6 +20,12 @@ WORKSPACE_ID = "jiahomedesign1"
 _KNOWLEDGE_DIR = os.path.join(os.path.dirname(__file__), "knowledge")
 CONTACTS_FILE = os.path.join(_KNOWLEDGE_DIR, "contacts.json")
 
+sys.path.insert(0, os.path.dirname(__file__))
+try:
+    from shared.db import db_exec as _db_exec
+except ImportError:
+    _db_exec = None
+
 # mode → 負責的條件
 # morning : #2 今日開始、#4 今日到期（時間未到）、#9 每日摘要
 # noon    : #1 開始倒數、#3 結束倒數、#7 停滯、#8 全完成
@@ -28,8 +35,37 @@ CONTACTS_FILE = os.path.join(_KNOWLEDGE_DIR, "contacts.json")
 # board_name = "__summary__" 為每日摘要，不分組
 
 
+def _load_contacts_from_db() -> dict | None:
+    if _db_exec is None:
+        return None
+    def _query(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT line_id, display_name FROM line_users "
+                "WHERE role IN ('admin', 'employee', 'vendor', 'customer')"
+            )
+            return cur.fetchall()
+    rows = _db_exec(_query)
+    if rows is None:
+        return None
+    result = {}
+    for row in rows:
+        if isinstance(row, dict):
+            line_id, name = row["line_id"], row["display_name"] or row["line_id"]
+        else:
+            line_id, name = row[0], row[1] or row[0]
+        result[name.lower()] = line_id
+    return result
+
+
 def load_contacts() -> dict:
-    """Return {name_lower: line_id}. Supports both old {name: id} and new {name: {line_id, projects}} formats."""
+    """Return {name_lower: line_id} from DB; falls back to contacts.json on error."""
+    try:
+        result = _load_contacts_from_db()
+        if result is not None:
+            return result
+    except Exception as e:
+        print(f"[notifier] WARNING: DB load_contacts failed: {e}, falling back to file")
     try:
         with open(CONTACTS_FILE, encoding="utf-8") as f:
             data = json.load(f)

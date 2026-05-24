@@ -10,21 +10,62 @@ LINE Gateway — 純 I/O，不含 AI 邏輯
 import base64
 import hashlib
 import hmac
+import json
 import os
+import threading
 
 import requests
 from flask import Flask, abort, request
 
 from shared.broker import MQTTBroker
+from shared.db import db_exec
 
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_PROFILE_URL = "https://api.line.me/v2/bot/profile/{}"
 
 INBOX_TOPIC = "agents/customer_service/inbox"
 OUTBOX_TOPIC = "gateway/outbox"
 
 app = Flask(__name__)
 broker = MQTTBroker(client_id="line_gateway")
+
+
+# ── LINE user auto-registration ──────────────────────────────────────────────
+
+def _upsert_line_user(user_id: str):
+    try:
+        resp = requests.get(
+            LINE_PROFILE_URL.format(user_id),
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            profile = resp.json()
+            display_name = profile.get("displayName")
+            picture_url = profile.get("pictureUrl")
+        else:
+            print(f"[GW] Profile API {resp.status_code} for {user_id[:8]}, using minimal record")
+            display_name = None
+            picture_url = None
+
+        def _do_upsert(conn, _uid=user_id, _dn=display_name, _pu=picture_url):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO line_users (line_id, display_name, picture_url) "
+                    "VALUES (%s, %s, %s) "
+                    "ON CONFLICT (line_id) DO UPDATE "
+                    "SET display_name = EXCLUDED.display_name, "
+                    "    picture_url  = EXCLUDED.picture_url, "
+                    "    updated_at   = now() "
+                    "WHERE line_users.display_name IS DISTINCT FROM EXCLUDED.display_name "
+                    "   OR line_users.picture_url  IS DISTINCT FROM EXCLUDED.picture_url",
+                    (_uid, _dn, _pu),
+                )
+
+        db_exec(_do_upsert)
+    except Exception as e:
+        print(f"[GW] WARNING: upsert_line_user failed for {user_id[:8]}: {e}")
 
 
 # ── LINE Push API ─────────────────────────────────────────────────────────────
@@ -81,6 +122,8 @@ def webhook():
         text = msg.get("text", "").strip()
         if not text:
             continue
+
+        threading.Thread(target=_upsert_line_user, args=(user_id,), daemon=True).start()
 
         broker.publish(INBOX_TOPIC, {
             "user_id": user_id,
