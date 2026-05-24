@@ -211,6 +211,16 @@ def update_user(line_id: str):
     if not rows:
         return jsonify({"error": "not found"}), 404
     log.info(f"[admin] Updated user {line_id[:8]} role={new_role}")
+
+    # Clear working_memory so Claude doesn't answer from stale context
+    def _clear_memory(conn, _lid=line_id):
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM working_memory WHERE agent_id='customer_service' AND thread_id=%s",
+                (_lid,),
+            )
+    db_exec(_clear_memory)
+
     return jsonify({"ok": True})
 
 
