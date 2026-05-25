@@ -22,7 +22,7 @@ BEGIN
         -- Look up board_id from trello_boards
         SELECT tb.board_id INTO board_id
         FROM trello_boards tb
-        WHERE tb.board_name = board_name
+        WHERE tb.board_name = bname
         LIMIT 1;
 
         -- Check if a project record already exists for this board_id/name
@@ -34,7 +34,7 @@ BEGIN
         ELSE
             SELECT project_id INTO proj_id
             FROM projects
-            WHERE name = board_name AND trello_board_id IS NULL
+            WHERE name = bname AND trello_board_id IS NULL
             LIMIT 1;
         END IF;
 
@@ -50,11 +50,11 @@ BEGIN
             case_num := yr || '年第' || seq || '案';
 
             IF board_id IS NULL THEN
-                RAISE WARNING 'migrate_jsonb_projects: no board_id for board_name ''%'' (line_id: %), creating orphan project', board_name, rec.line_id;
+                RAISE WARNING 'migrate_jsonb_projects: no board_id for board_name ''%'' (line_id: %), creating orphan project', bname, rec.line_id;
             END IF;
 
             INSERT INTO projects (case_number, name, trello_board_id, status)
-            VALUES (case_num, board_name, board_id, 'active')
+            VALUES (case_num, bname, board_id, 'active')
             RETURNING project_id INTO proj_id;
         END IF;
 
