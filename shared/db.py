@@ -1,4 +1,5 @@
 import os
+import pathlib
 import threading
 
 import psycopg2
@@ -24,6 +25,52 @@ def get_pool() -> psycopg2.pool.ThreadedConnectionPool | None:
             except Exception as e:
                 print(f"[WARN] DB pool init failed: {e}")
     return _pool
+
+
+MIGRATIONS = [
+    "001_init.sql",
+    "002_trello_boards.sql",
+    "003_line_users.sql",
+    "004_alias_name.sql",
+    "005_projects.sql",
+    "006_line_user_projects.sql",
+    "007_migrate_jsonb_projects.sql",
+]
+
+_MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent / "migrations"
+
+
+def run_migrations() -> None:
+    pool = get_pool()
+    if not pool:
+        print("[WARN] run_migrations: no DB pool, skipping")
+        return
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations "
+                "(filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT now())"
+            )
+            conn.commit()
+            for fname in MIGRATIONS:
+                cur.execute("SELECT 1 FROM schema_migrations WHERE filename=%s", (fname,))
+                if cur.fetchone():
+                    continue
+                sql_path = _MIGRATIONS_DIR / fname
+                if not sql_path.exists():
+                    print(f"[WARN] migration file not found: {sql_path}")
+                    continue
+                sql = sql_path.read_text()
+                cur.execute(sql)
+                cur.execute("INSERT INTO schema_migrations (filename) VALUES (%s)", (fname,))
+                conn.commit()
+                print(f"[INFO] migration applied: {fname}")
+    except Exception as e:
+        print(f"[WARN] run_migrations error: {e}")
+        conn.rollback()
+    finally:
+        pool.putconn(conn)
 
 
 def db_exec(fn):

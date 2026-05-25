@@ -35,6 +35,47 @@ except ImportError:
 # board_name = "__summary__" 為每日摘要，不分組
 
 
+
+def _resolve_tag_recipients(names: list[str]) -> list[str]:
+    """Resolve Trello tag names to LINE IDs via alias_name DB lookup."""
+    if not names or _db_exec is None:
+        return []
+    def _query(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT alias_name, line_id FROM line_users WHERE alias_name = ANY(%s)",
+                (names,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    mapping = _db_exec(_query) or {}
+    result = []
+    for n in names:
+        if n in mapping:
+            result.append(mapping[n])
+        else:
+            print(f"[notifier] WARNING: alias not found: {n}")
+    return result
+
+
+def _resolve_recipients_by_board_id(board_id: str) -> list[str]:
+    """Resolve LINE IDs for all users assigned to the project with this Trello board_id."""
+    if not board_id or _db_exec is None:
+        return []
+    def _query(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT lup.line_id FROM line_user_projects lup "
+                "JOIN projects p ON p.project_id = lup.project_id "
+                "WHERE p.trello_board_id = %s",
+                (board_id,),
+            )
+            return [row[0] for row in cur.fetchall()]
+    result = _db_exec(_query) or []
+    if not result:
+        print(f"[notifier] WARNING: no recipients for board_id: {board_id}")
+    return result
+
+
 def _load_contacts_from_db() -> dict | None:
     if _db_exec is None:
         return None
@@ -197,8 +238,8 @@ def fmt_item(list_name, card_name, body):
 
 
 def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, notifications, mode):
-    sponsors = [contacts[n] for n in names if n in contacts]
-    sa_larry = [uid for n, uid in contacts.items() if n in ("sa", "larry")]
+    sponsors = _resolve_tag_recipients(names) or [contacts[n] for n in names if n in contacts]
+    sa_larry = _resolve_tag_recipients(["sa", "larry"]) or [uid for n, uid in contacts.items() if n in ("sa", "larry")]
     now_time = datetime.now(TAIPEI).time()
     is_weekday = date.today().weekday() < 5
 
@@ -276,7 +317,7 @@ def run_checks(mode):
                         incomplete = [i for i in items if i["state"] == "incomplete"]
                         if incomplete and days_stale >= 3:
                             item_text = fmt_item(list_name, card["name"], f"已停滯 {days_stale} 天，請追蹤")
-                            for uid in [contacts.get("sa"), contacts.get("larry")]:
+                            for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
                                 if uid:
                                     notifications.append((uid, board_name, item_text))
 
@@ -310,7 +351,7 @@ def run_checks(mode):
             summary = f"📋 {now_str} 每日工程摘要\n\n" + "\n\n".join(sections)
         else:
             summary = f"📋 {now_str} 今日無進行中工項"
-        for uid in [contacts.get("sa"), contacts.get("larry")]:
+        for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
             if uid:
                 notifications.append((uid, "__summary__", summary))
 

@@ -74,30 +74,32 @@ def _load_project_photos() -> dict:
 
 
 def _get_user_role_and_projects(user_id: str) -> tuple:
-    """Return (role, projects) from DB. Defaults to ('visitor', []) on any error."""
+    """Return (role, board_names) via line_user_projects → projects → trello_boards. Defaults to ('visitor', []) on error."""
     def _query(conn):
         with conn.cursor() as cur:
+            cur.execute("SELECT role FROM line_users WHERE line_id = %s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return None, []
+            role = row[0]
             cur.execute(
-                "SELECT role, projects FROM line_users WHERE line_id = %s",
+                "SELECT tb.board_name FROM line_user_projects lup "
+                "JOIN projects p ON p.project_id = lup.project_id "
+                "JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
+                "WHERE lup.line_id = %s AND p.trello_board_id IS NOT NULL",
                 (user_id,),
             )
-            return cur.fetchone()
+            board_names = [r[0] for r in cur.fetchall()]
+            return role, board_names
 
     try:
-        row = db_exec(_query)
+        result = db_exec(_query)
     except Exception:
-        row = None
+        result = None
 
-    if row is None:
+    if result is None or result[0] is None:
         return "visitor", []
-    role = row["role"] if isinstance(row, dict) else row[0]
-    projects = row["projects"] if isinstance(row, dict) else row[1]
-    if isinstance(projects, str):
-        try:
-            projects = json.loads(projects)
-        except Exception:
-            projects = []
-    return role, (projects or [])
+    return result[0], result[1]
 
 
 _KNOWLEDGE_BASE = _load_knowledge_base()
