@@ -335,18 +335,27 @@ def create_project():
     folder_name = (body.get("folder_name") or "").strip()
     trello_board_id = (body.get("trello_board_id") or None)
     notes = body.get("notes")
+    import_existing = bool(body.get("import_existing"))
 
     if not name:
         return jsonify({"error": "name is required"}), 400
-    if not folder_name:
-        return jsonify({"error": "folder_name is required"}), 400
 
     year = datetime.date.today().year
     case_number = _generate_case_number(year)
 
     nas_path = None
     nas_warning = None
-    if folder_name:
+    if import_existing:
+        if folder_name:
+            candidate = folder_name if folder_name.startswith("/") else os.path.join(NAS_ACTIVE_PATH, folder_name)
+            if not candidate.startswith(NAS_MOUNT_PATH):
+                return jsonify({"error": f"路徑須位於 {NAS_MOUNT_PATH} 之下"}), 400
+            if not os.path.isdir(candidate):
+                return jsonify({"error": f"資料夾不存在：{candidate}"}), 400
+            nas_path = candidate
+    else:
+        if not folder_name:
+            return jsonify({"error": "folder_name is required"}), 400
         nas_path, nas_warning = _provision_nas_folder(folder_name)
         if nas_warning == "folder exists":
             return jsonify({"error": "NAS folder already exists", "folder": folder_name}), 409
@@ -403,7 +412,7 @@ def get_project(project_id: str):
 @require_auth
 def update_project(project_id: str):
     body = request.get_json() or {}
-    allowed = {"name", "trello_board_id", "status", "notes"}
+    allowed = {"name", "trello_board_id", "status", "notes", "nas_path"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         return jsonify({"error": "no valid fields"}), 400
@@ -411,6 +420,15 @@ def update_project(project_id: str):
     valid_statuses = {"active", "completed", "archived"}
     if "status" in updates and updates["status"] not in valid_statuses:
         return jsonify({"error": f"invalid status: {updates['status']}"}), 400
+
+    if "nas_path" in updates:
+        new_nas = (updates["nas_path"] or "").strip() or None
+        if new_nas:
+            if not new_nas.startswith(NAS_MOUNT_PATH):
+                return jsonify({"error": f"nas_path 必須位於 {NAS_MOUNT_PATH} 之下"}), 400
+            if not os.path.isdir(new_nas):
+                return jsonify({"error": f"資料夾不存在：{new_nas}"}), 400
+        updates["nas_path"] = new_nas
 
     def _upd(conn):
         with conn.cursor() as cur:
@@ -581,7 +599,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
       <button class="btn btn-b" onclick="loadUsers()">重新整理</button>
     </div>
     <table>
-      <thead><tr><th>頭貼</th><th>顯示名稱</th><th>LINE ID</th><th>角色</th><th>建立時間</th><th>操作</th></tr></thead>
+      <thead><tr><th>頭貼</th><th>顯示名稱</th><th>簡稱</th><th>LINE ID</th><th>角色</th><th>建立時間</th><th>操作</th></tr></thead>
       <tbody id="utb"><tr><td colspan="6" class="empty">載入中…</td></tr></tbody>
     </table>
   </div>
@@ -598,6 +616,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
         <option value="archived">已封存</option>
       </select>
       <button class="btn btn-g" onclick="openAddProject()">＋ 新增專案</button>
+      <button class="btn btn-b" onclick="openImportProject()" style="margin-left:8px">↳ 匯入既有專案</button>
       <button class="btn btn-b" onclick="loadProjects()">重新整理</button>
     </div>
     <table>
@@ -662,7 +681,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
   <div class="field"><label class="lbl">備註</label><textarea id="pNotes" rows="2"></textarea></div>
   <!-- Edit-only fields -->
   <div id="pEditFields" style="display:none">
-    <div class="field"><label class="lbl">NAS 路徑（唯讀）</label><input type="text" id="pNasPath" readonly style="background:#f9f9f9;font-size:12px"></div>
+    <div class="field"><label class="lbl">NAS 路徑</label><input type="text" id="pNasPath" style="font-size:12px" placeholder="/mnt/nas/jia.homedesign/00. 執行中案場/XXX"><div id="pNasHint" style="font-size:11px;color:#888;margin-top:4px"></div></div>
     <div class="field">
       <label class="lbl">狀態</label>
       <select id="pStatus">
@@ -733,7 +752,7 @@ const ROLE_CLS={admin:'br',employee:'ba',vendor:'bo',customer:'bp',visitor:'bv'}
 const STATUS_LABEL={active:'進行中',completed:'已完成',archived:'已封存'};
 const STATUS_CLS={active:'ba',completed:'bp',archived:'bv'};
 let boards=[], contacts={}, editing=null, editingUid=null;
-let allProjects=[], editingPid=null, projectMembers=[], editingMmPid=null;
+let allProjects=[], editingPid=null, importMode=false, projectMembers=[], editingMmPid=null;
 let allUsers=[];
 
 function switchTab(t){
@@ -765,11 +784,15 @@ function renderUsers(users){
     else{const div=document.createElement('div');div.className='avatar';avatar.appendChild(div);}
 
     const tdName=tr.insertCell();
-    const nameSpan=document.createElement('span'); nameSpan.textContent=u.display_name||'（未知）';
-    tdName.appendChild(nameSpan);
+    tdName.textContent=u.display_name||'（未知）';
+
+    const tdAlias=tr.insertCell();
     if(u.alias_name){
-      const ab=document.createElement('span');ab.className='badge bal';ab.style.marginLeft='6px';ab.textContent=u.alias_name;
-      tdName.appendChild(ab);
+      const ab=document.createElement('span');ab.className='badge bal';ab.textContent=u.alias_name;
+      tdAlias.appendChild(ab);
+    } else {
+      tdAlias.style.cssText='color:#666';
+      tdAlias.textContent='—';
     }
 
     const tdId=tr.insertCell(); tdId.style.cssText='font-family:monospace;font-size:11px;color:#aaa';
@@ -885,16 +908,40 @@ function renderProjects(projects){
 
 async function openAddProject(){
   if(!boards.length) boards=await fetch('/api/boards').then(r=>r.json()).catch(()=>[]);
-  editingPid=null;
+  editingPid=null; importMode=false;
   document.getElementById('pdlgT').textContent='新增專案';
   document.getElementById('pName').value='';
   document.getElementById('pFolder').value='';
+  document.getElementById('pFolder').placeholder='115-001-XX公館';
   document.getElementById('pNotes').value='';
   document.getElementById('pFolderField').style.display='';
+  document.getElementById('pFolderField').querySelector('.hint').textContent='將在「00. 執行中案場/」下建立';
   document.getElementById('pEditFields').style.display='none';
   const sel=document.getElementById('pBoard');
   sel.innerHTML='<option value="">（不指定）</option>';
   boards.forEach(b=>{const o=document.createElement('option');o.value=b.board_id||b;o.textContent=b.board_name||b;sel.appendChild(o);});
+  document.getElementById('pdlg').showModal();
+}
+
+function _fillBoardSelect(selectedId){
+  const sel=document.getElementById('pBoard');
+  while(sel.firstChild) sel.removeChild(sel.firstChild);
+  const o0=document.createElement('option');o0.value='';o0.textContent='（不指定）';sel.appendChild(o0);
+  boards.forEach(b=>{const o=document.createElement('option');o.value=b.board_id||b;o.textContent=b.board_name||b;if(selectedId&&(b.board_id||b)===selectedId)o.selected=true;sel.appendChild(o);});
+}
+
+async function openImportProject(){
+  if(!boards.length) boards=await fetch('/api/boards').then(r=>r.json()).catch(()=>[]);
+  editingPid=null; importMode=true;
+  document.getElementById('pdlgT').textContent='匯入既有專案（不會建立 NAS 資料夾）';
+  document.getElementById('pName').value='';
+  document.getElementById('pFolder').value='';
+  document.getElementById('pFolder').placeholder='既有資料夾名稱或完整路徑（留空表示無 NAS 資料夾）';
+  document.getElementById('pNotes').value='';
+  document.getElementById('pFolderField').style.display='';
+  document.getElementById('pFolderField').querySelector('.hint').textContent='填入既有資料夾名（位於 00. 執行中案場/ 下）或完整路徑；留空則不綁定 NAS';
+  document.getElementById('pEditFields').style.display='none';
+  _fillBoardSelect(null);
   document.getElementById('pdlg').showModal();
 }
 
@@ -906,7 +953,10 @@ async function openEditProject(p){
   document.getElementById('pNotes').value=p.notes||'';
   document.getElementById('pFolderField').style.display='none';
   document.getElementById('pEditFields').style.display='';
-  document.getElementById('pNasPath').value=p.nas_path||'';
+  const nasInput=document.getElementById('pNasPath');
+  nasInput.value=p.nas_path||'';
+  nasInput.readOnly=false;nasInput.style.background='';
+  document.getElementById('pNasHint').textContent='完整路徑（須位於 NAS 掛載點下且實際存在）；改動不會影響 NAS 上的檔案';
   document.getElementById('pStatus').value=p.status||'active';
   const sel=document.getElementById('pBoard');
   sel.innerHTML='<option value="">（不指定）</option>';
@@ -923,12 +973,14 @@ async function saveProject(){
   let res;
   if(!editingPid){
     const folder=document.getElementById('pFolder').value.trim();
-    if(!folder){alert('請填寫 NAS 資料夾名稱');return;}
+    if(!importMode && !folder){alert('請填寫 NAS 資料夾名稱');return;}
     const body={name,folder_name:folder,trello_board_id:board_id,notes};
+    if(importMode) body.import_existing=true;
     res=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   } else {
     const status=document.getElementById('pStatus').value;
-    const body={name,trello_board_id:board_id,status,notes};
+    const nas_path=document.getElementById('pNasPath').value.trim()||null;
+    const body={name,trello_board_id:board_id,status,notes,nas_path};
     res=await fetch('/api/projects/'+encodeURIComponent(editingPid),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   }
   const d=await res.json();
