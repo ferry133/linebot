@@ -8,6 +8,7 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 COPY trello_line_notifier.py linebot_server.py gantt_generator.py ./
+COPY migrations/ ./migrations/
 COPY shared/ ./shared/
 COPY agents/ ./agents/
 COPY gateway/ ./gateway/
