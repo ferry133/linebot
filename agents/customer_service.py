@@ -74,7 +74,7 @@ def _load_project_photos() -> dict:
 
 
 def _get_user_role_and_projects(user_id: str) -> tuple:
-    """Return (role, board_names) via line_user_projects → projects → trello_boards. Defaults to ('visitor', []) on error."""
+    """Return (role, projects) where projects is [{'name': str, 'board_id': str}] for active projects with a Trello board."""
     def _query(conn):
         with conn.cursor() as cur:
             cur.execute("SELECT role FROM line_users WHERE line_id = %s", (user_id,))
@@ -83,14 +83,13 @@ def _get_user_role_and_projects(user_id: str) -> tuple:
                 return None, []
             role = row[0]
             cur.execute(
-                "SELECT tb.board_name FROM line_user_projects lup "
+                "SELECT p.name, p.trello_board_id FROM line_user_projects lup "
                 "JOIN projects p ON p.project_id = lup.project_id "
-                "JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
                 "WHERE lup.line_id = %s AND p.trello_board_id IS NOT NULL AND p.status = 'active'",
                 (user_id,),
             )
-            board_names = [r[0] for r in cur.fetchall()]
-            return role, board_names
+            projects = [{"name": r[0], "board_id": r[1]} for r in cur.fetchall()]
+            return role, projects
 
     try:
         result = db_exec(_query)
@@ -269,6 +268,10 @@ class CustomerServiceAgent:
         system = SYSTEM_PROMPT
         if memory_context:
             system += f"\n\n{memory_context}"
+        role, user_projects = _get_user_role_and_projects(user_id)
+        if user_projects:
+            names = "、".join(p["name"] for p in user_projects)
+            system += f"\n\n## 此使用者的進行中專案\n{names}\n當使用者提到專案時，請以這些「專案名稱」（非 Trello 看板名稱）來辨識與回應。"
 
         history = self.memory.get_working(user_id)
         new_messages = [{"role": "user", "content": user_message}]
@@ -368,18 +371,18 @@ class CustomerServiceAgent:
             result[0] = payload.get("result", "查詢失敗")
             event.set()
 
-    def _get_allowed_boards(self, user_id: str):
-        """None = no restriction, [] = blocked, [str] = allowed board names."""
+    def _get_allowed_board_ids(self, user_id: str):
+        """None = no restriction, [] = blocked, [str] = allowed Trello board_ids."""
         role, projects = _get_user_role_and_projects(user_id)
         if role in ("admin", "employee"):
             return None
         if role in ("vendor", "customer"):
-            return projects
+            return [p["board_id"] for p in projects]
         return []  # visitor or unknown
 
     def _query_trello(self, query_type: str, keyword: str = "", user_id: str = "") -> str:
-        allowed_boards = self._get_allowed_boards(user_id) if user_id else None
-        if allowed_boards is not None and len(allowed_boards) == 0:
+        allowed_board_ids = self._get_allowed_board_ids(user_id) if user_id else None
+        if allowed_board_ids is not None and len(allowed_board_ids) == 0:
             return "您目前沒有工程查詢權限，如有需要請聯繫我們的服務人員。"
 
         request_id = str(uuid.uuid4())
@@ -394,7 +397,7 @@ class CustomerServiceAgent:
             "reply_to": reply_topic,
             "query_type": query_type,
             "keyword": keyword,
-            "allowed_boards": allowed_boards,
+            "allowed_board_ids": allowed_board_ids,
         })
 
         try:

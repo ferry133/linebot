@@ -63,9 +63,9 @@ class TrelloAgent:
             log.info(f"[{AGENT_ID}] Missing reply_to in request {request_id}")
             return
 
-        allowed_boards = payload.get("allowed_boards", None)  # None=all, []=blocked, [str]=filter
-        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed={allowed_boards}")
-        result = self._query(query_type, keyword, allowed_boards)
+        allowed_board_ids = payload.get("allowed_board_ids", payload.get("allowed_boards"))  # None=all, []=blocked, [str]=filter by board_id
+        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed_ids={allowed_board_ids}")
+        result = self._query(query_type, keyword, allowed_board_ids)
         self.broker.publish(reply_to, {
             "request_id": request_id,
             "result": result,
@@ -101,7 +101,7 @@ class TrelloAgent:
                     if parsed:
                         names, start, end, end_time, label = parsed
                         items.append({
-                            "board": board_name, "list": list_name,
+                            "board": board_name, "board_id": board["id"], "list": list_name,
                             "card": card["name"], "label": label or card["name"],
                             "names": names, "start": str(start), "end": str(end),
                             "source": "card_desc",
@@ -113,7 +113,7 @@ class TrelloAgent:
                             continue
                         names, start, end, end_time, label = parsed
                         items.append({
-                            "board": board_name, "list": list_name,
+                            "board": board_name, "board_id": board["id"], "list": list_name,
                             "card": card["name"], "label": label,
                             "names": names, "start": str(start), "end": str(end),
                             "state": it["state"], "source": "checklist",
@@ -125,19 +125,17 @@ class TrelloAgent:
         return items
 
     def _query(self, query_type: str, keyword: str = "",
-               allowed_boards: list[str] | None = None) -> str:
+               allowed_board_ids: list[str] | None = None) -> str:
         try:
             items = self._scan_all_items()
         except Exception as e:
             log.info(f"[{AGENT_ID}] Trello error: {e}")
             return f"查詢 Trello 失敗：{e}"
 
-        # Per-user board filtering (None = no restriction)
-        if allowed_boards is not None:
-            items = [i for i in items if any(
-                a.lower() in i["board"].lower() or i["board"].lower() in a.lower()
-                for a in allowed_boards
-            )]
+        # Per-user authorization filter (None = no restriction); exact board_id match
+        if allowed_board_ids is not None:
+            allowed_set = set(allowed_board_ids)
+            items = [i for i in items if i.get("board_id") in allowed_set]
 
         if not items:
             return "目前 Trello 無任何有標記的工項。"
