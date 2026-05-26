@@ -38,6 +38,7 @@ ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
 
 NAS_MOUNT_PATH = os.environ.get("NAS_MOUNT_PATH", "/mnt/nas/jia.homedesign")
 NAS_ACTIVE_PATH = os.path.join(NAS_MOUNT_PATH, "00. 執行中案場")
+NAS_ARCHIVED_PATH = os.path.join(NAS_MOUNT_PATH, "archived")
 NAS_TEMPLATE_PATH = os.environ.get(
     "NAS_TEMPLATE_PATH",
     os.path.join(NAS_MOUNT_PATH, "C.公司SOP表單 and Check list/01.新開案資料夾：電腦檔案資料夾編號順序01.02.03"),
@@ -281,6 +282,42 @@ def _provision_nas_folder(folder_name: str):
         return None, str(e)
 
 
+def _archive_nas_folder(current_path: str) -> tuple:
+    """Move folder from current location into NAS_ARCHIVED_PATH. Returns (new_path, error)."""
+    if not current_path or not os.path.isdir(current_path):
+        return None, f"NAS 路徑不存在：{current_path}"
+    try:
+        os.makedirs(NAS_ARCHIVED_PATH, exist_ok=True)
+    except OSError as e:
+        return None, f"無法建立 archived 目錄：{e}"
+    base = os.path.basename(current_path.rstrip("/"))
+    dest = os.path.join(NAS_ARCHIVED_PATH, base)
+    if os.path.exists(dest):
+        dest = os.path.join(NAS_ARCHIVED_PATH, f"{base}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}")
+    try:
+        os.rename(current_path, dest)
+    except OSError as e:
+        return None, f"移動失敗：{e}"
+    log.info("[admin] archived NAS folder: %s → %s", current_path, dest)
+    return dest, None
+
+
+def _restore_nas_folder(current_path: str) -> tuple:
+    """Move folder from archived back to NAS_ACTIVE_PATH. Returns (new_path, error)."""
+    if not current_path or not os.path.isdir(current_path):
+        return None, f"NAS 路徑不存在：{current_path}"
+    base = os.path.basename(current_path.rstrip("/"))
+    dest = os.path.join(NAS_ACTIVE_PATH, base)
+    if os.path.exists(dest):
+        return None, f"目標已存在，無法還原：{dest}"
+    try:
+        os.rename(current_path, dest)
+    except OSError as e:
+        return None, f"還原失敗：{e}"
+    log.info("[admin] restored NAS folder: %s → %s", current_path, dest)
+    return dest, None
+
+
 # ── NAS folders ───────────────────────────────────────────────────────────────
 
 @app.get("/api/nas/folders")
@@ -452,6 +489,30 @@ def update_project(project_id: str):
             if not os.path.isdir(new_nas):
                 return jsonify({"error": f"資料夾不存在：{new_nas}"}), 400
         updates["nas_path"] = new_nas
+
+    if "status" in updates:
+        def _cur(conn):
+            with conn.cursor() as cur:
+                cur.execute("SELECT status, nas_path FROM projects WHERE project_id = %s::uuid", (project_id,))
+                return cur.fetchone()
+        row = db_exec(_cur)
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        old_status, old_nas = row
+        new_status = updates["status"]
+        if old_status != new_status:
+            if new_status == "archived" and old_nas:
+                moved, err = _archive_nas_folder(old_nas)
+                if err:
+                    return jsonify({"error": err}), 500
+                updates["nas_path"] = moved
+            elif old_status == "archived" and new_status == "active" and old_nas:
+                moved, err = _restore_nas_folder(old_nas)
+                if err:
+                    return jsonify({"error": err}), 500
+                updates["nas_path"] = moved
+            elif old_status == "archived" and new_status == "completed":
+                return jsonify({"error": "請先還原為進行中後再標記已完成"}), 400
 
     def _upd(conn):
         with conn.cursor() as cur:
@@ -939,6 +1000,9 @@ function renderProjects(projects){
     const tdAct=tr.insertCell();
     const eb=document.createElement('button');eb.className='btn btn-b';eb.textContent='編輯';eb.onclick=()=>openEditProject(p);tdAct.appendChild(eb);
     const mb=document.createElement('button');mb.className='btn btn-b';mb.style.marginLeft='4px';mb.textContent='人員';mb.onclick=()=>openMembers(p);tdAct.appendChild(mb);
+    if(p.status==='archived'){
+      const rb=document.createElement('button');rb.className='btn btn-g';rb.style.marginLeft='4px';rb.textContent='還原';rb.onclick=()=>restoreProject(p);tdAct.appendChild(rb);
+    }
   });
 }
 
@@ -1054,6 +1118,17 @@ async function saveProject(){
   if(d.nas_warning) alert('注意：'+d.nas_warning);
   document.getElementById('pdlg').close();
   loadProjects();
+}
+
+async function restoreProject(p){
+  if(!confirm('將「'+p.name+'」還原為進行中？資料夾會搬回「00. 執行中案場/」。')) return;
+  const res=await fetch('/api/projects/'+encodeURIComponent(p.project_id),{
+    method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({status:'active'})
+  });
+  const d=await res.json().catch(()=>({}));
+  if(!res.ok){alert(d.error||'還原失敗');return;}
+  allProjects=[]; loadProjects();
 }
 
 async function openMembers(p){

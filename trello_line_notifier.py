@@ -66,7 +66,7 @@ def _resolve_recipients_by_board_id(board_id: str) -> list[str]:
             cur.execute(
                 "SELECT lup.line_id FROM line_user_projects lup "
                 "JOIN projects p ON p.project_id = lup.project_id "
-                "WHERE p.trello_board_id = %s",
+                "WHERE p.trello_board_id = %s AND p.status = 'active'",
                 (board_id,),
             )
             return [row[0] for row in cur.fetchall()]
@@ -269,13 +269,31 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
             add(set(sponsors + sa_larry), f"「{label}」已逾期 {abs(days_diff(end))} 天，請確認")
 
 
+def _inactive_board_ids() -> set:
+    """Trello board_ids whose project is completed or archived — skip in notifier."""
+    if _db_exec is None:
+        return set()
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trello_board_id FROM projects "
+                "WHERE trello_board_id IS NOT NULL AND status IN ('completed','archived')"
+            )
+            return {row[0] for row in cur.fetchall()}
+    return _db_exec(_q) or set()
+
+
 def run_checks(mode):
     contacts = load_contacts()
     boards = get_boards()
+    skip_ids = _inactive_board_ids()
     notifications = []
     summary_items = []
 
     for board in boards:
+        if board["id"] in skip_ids:
+            print(f"[notifier] skip non-active project board: {board.get('name')}")
+            continue
         board_name = board["name"]
         list_map = get_lists(board["id"])
         cards = get_cards(board["id"])

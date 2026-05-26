@@ -86,7 +86,7 @@ def _get_user_role_and_projects(user_id: str) -> tuple:
                 "SELECT tb.board_name FROM line_user_projects lup "
                 "JOIN projects p ON p.project_id = lup.project_id "
                 "JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
-                "WHERE lup.line_id = %s AND p.trello_board_id IS NOT NULL",
+                "WHERE lup.line_id = %s AND p.trello_board_id IS NOT NULL AND p.status = 'active'",
                 (user_id,),
             )
             board_names = [r[0] for r in cur.fetchall()]
