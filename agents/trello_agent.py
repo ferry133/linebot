@@ -64,8 +64,9 @@ class TrelloAgent:
             return
 
         allowed_board_ids = payload.get("allowed_board_ids", payload.get("allowed_boards"))  # None=all, []=blocked, [str]=filter by board_id
-        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed_ids={allowed_board_ids}")
-        result = self._query(query_type, keyword, allowed_board_ids)
+        project_map = payload.get("project_map") or {}  # {board_id: project_name}
+        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed_ids={allowed_board_ids} projects={len(project_map)}")
+        result = self._query(query_type, keyword, allowed_board_ids, project_map)
         self.broker.publish(reply_to, {
             "request_id": request_id,
             "result": result,
@@ -125,7 +126,9 @@ class TrelloAgent:
         return items
 
     def _query(self, query_type: str, keyword: str = "",
-               allowed_board_ids: list[str] | None = None) -> str:
+               allowed_board_ids: list[str] | None = None,
+               project_map: dict | None = None) -> str:
+        project_map = project_map or {}
         try:
             items = self._scan_all_items()
         except Exception as e:
@@ -136,6 +139,10 @@ class TrelloAgent:
         if allowed_board_ids is not None:
             allowed_set = set(allowed_board_ids)
             items = [i for i in items if i.get("board_id") in allowed_set]
+
+        # Attach project_name (falls back to Trello board name if no mapping)
+        for i in items:
+            i["project_name"] = project_map.get(i.get("board_id"), i["board"])
 
         if not items:
             return "目前 Trello 無任何有標記的工項。"
@@ -158,7 +165,7 @@ class TrelloAgent:
             kw = keyword.lower()
             filtered = [
                 i for i in items
-                if kw in i["board"].lower() or kw in i["card"].lower()
+                if kw in i["project_name"].lower() or kw in i["card"].lower()
                 or kw in i["label"].lower() or any(kw in n for n in i["names"])
             ]
             label = f"關鍵字「{keyword}」相關工項"
@@ -176,7 +183,7 @@ class TrelloAgent:
                 " ⬜" if i.get("state") == "incomplete" else "")
             end_str = f"，到期：{i['end']}" if i["end"] != "None" else ""
             lines.append(
-                f"・{i['board']} / {i['list']} / {i['card']}\n"
+                f"・{i['project_name']} / {i['list']} / {i['card']}\n"
                 f"  {i['label']}{state_str}{end_str}"
             )
         return "\n".join(lines)

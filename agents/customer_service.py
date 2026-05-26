@@ -73,6 +73,21 @@ def _load_project_photos() -> dict:
         return {}
 
 
+def _all_active_projects() -> dict:
+    """Returns {board_id: project_name} for all active projects with a Trello board."""
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trello_board_id, name FROM projects "
+                "WHERE trello_board_id IS NOT NULL AND status = 'active'"
+            )
+            return {r[0]: r[1] for r in cur.fetchall()}
+    try:
+        return db_exec(_q) or {}
+    except Exception:
+        return {}
+
+
 def _get_user_role_and_projects(user_id: str) -> tuple:
     """Return (role, projects) where projects is [{'name': str, 'board_id': str}] for active projects with a Trello board."""
     def _query(conn):
@@ -371,17 +386,21 @@ class CustomerServiceAgent:
             result[0] = payload.get("result", "查詢失敗")
             event.set()
 
-    def _get_allowed_board_ids(self, user_id: str):
-        """None = no restriction, [] = blocked, [str] = allowed Trello board_ids."""
+    def _get_user_auth(self, user_id: str):
+        """Returns (allowed_board_ids, project_map) where project_map is {board_id: project_name}.
+        allowed_board_ids: None = no restriction, [] = blocked, [str] = filter.
+        For admin/employee, fetch all active projects so trello_agent can label items with project names."""
         role, projects = _get_user_role_and_projects(user_id)
+        proj_map = {p["board_id"]: p["name"] for p in projects}
         if role in ("admin", "employee"):
-            return None
+            all_projects = _all_active_projects()
+            return None, {**all_projects, **proj_map}
         if role in ("vendor", "customer"):
-            return [p["board_id"] for p in projects]
-        return []  # visitor or unknown
+            return [p["board_id"] for p in projects], proj_map
+        return [], {}
 
     def _query_trello(self, query_type: str, keyword: str = "", user_id: str = "") -> str:
-        allowed_board_ids = self._get_allowed_board_ids(user_id) if user_id else None
+        allowed_board_ids, project_map = self._get_user_auth(user_id) if user_id else (None, {})
         if allowed_board_ids is not None and len(allowed_board_ids) == 0:
             return "您目前沒有工程查詢權限，如有需要請聯繫我們的服務人員。"
 
@@ -398,6 +417,7 @@ class CustomerServiceAgent:
             "query_type": query_type,
             "keyword": keyword,
             "allowed_board_ids": allowed_board_ids,
+            "project_map": project_map,
         })
 
         try:
