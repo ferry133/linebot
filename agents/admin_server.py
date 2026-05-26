@@ -364,6 +364,7 @@ def create_project():
         return jsonify({"error": "name is required"}), 400
 
     nas_path = None
+    nas_warning = None
     if import_existing:
         if not case_number:
             return jsonify({"error": "case_number (folder) is required for import"}), 400
@@ -642,7 +643,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
       <button class="btn btn-b" onclick="loadProjects()">重新整理</button>
     </div>
     <table>
-      <thead><tr><th>案號</th><th>名稱</th><th>Trello 看板</th><th>NAS 路徑</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
+      <thead><tr><th>名稱</th><th>Trello 看板</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
       <tbody id="ptb"><tr><td colspan="7" class="empty">載入中…</td></tr></tbody>
     </table>
   </div>
@@ -929,10 +930,9 @@ function renderProjects(projects){
   tb.textContent='';
   projects.forEach(p=>{
     const tr=tb.insertRow();tr.className='proj-row';
-    tr.insertCell().textContent=p.case_number||'—';
     tr.insertCell().textContent=p.name||'—';
     tr.insertCell().textContent=p.board_name||'—';
-    const tdNas=tr.insertCell();tdNas.style.cssText='font-size:11px;color:#aaa;max-width:180px;overflow:hidden;text-overflow:ellipsis';tdNas.title=p.nas_path||'';tdNas.textContent=p.nas_path?p.nas_path.split('/').pop():'—';
+    const tdNas=tr.insertCell();tdNas.style.cssText='font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis';tdNas.title=p.nas_path||'';tdNas.textContent=p.nas_path?p.nas_path.split('/').pop():'—';
     const tdSt=tr.insertCell();
     const sb=document.createElement('span');sb.className='badge '+(STATUS_CLS[p.status]||'bv');sb.textContent=STATUS_LABEL[p.status]||p.status;tdSt.appendChild(sb);
     tr.insertCell().textContent=p.member_count||0;
