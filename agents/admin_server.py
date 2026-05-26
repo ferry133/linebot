@@ -850,7 +850,7 @@ const STATUS_LABEL={active:'進行中',completed:'已完成',archived:'已封存
 const STATUS_CLS={active:'ba',completed:'bp',archived:'bv'};
 let boards=[], contacts={}, editing=null, editingUid=null;
 let allProjects=[], editingPid=null, importMode=false, projectMembers=[], editingMmPid=null;
-let nasFolders=[], nasBase='';
+let nasFolders=[], nasBase='', editingOrigStatus='active';
 let allUsers=[];
 
 function switchTab(t){
@@ -998,9 +998,10 @@ function renderProjects(projects){
     const sb=document.createElement('span');sb.className='badge '+(STATUS_CLS[p.status]||'bv');sb.textContent=STATUS_LABEL[p.status]||p.status;tdSt.appendChild(sb);
     tr.insertCell().textContent=p.member_count||0;
     const tdAct=tr.insertCell();
-    const eb=document.createElement('button');eb.className='btn btn-b';eb.textContent='編輯';eb.onclick=()=>openEditProject(p);tdAct.appendChild(eb);
-    const mb=document.createElement('button');mb.className='btn btn-b';mb.style.marginLeft='4px';mb.textContent='人員';mb.onclick=()=>openMembers(p);tdAct.appendChild(mb);
-    if(p.status==='archived'){
+    const archived=p.status==='archived';
+    const eb=document.createElement('button');eb.className='btn btn-b';eb.textContent='編輯';eb.onclick=()=>openEditProject(p);if(archived){eb.disabled=true;eb.style.opacity='0.4';eb.style.cursor='not-allowed';}tdAct.appendChild(eb);
+    const mb=document.createElement('button');mb.className='btn btn-b';mb.style.marginLeft='4px';mb.textContent='人員';mb.onclick=()=>openMembers(p);if(archived){mb.disabled=true;mb.style.opacity='0.4';mb.style.cursor='not-allowed';}tdAct.appendChild(mb);
+    if(archived){
       const rb=document.createElement('button');rb.className='btn btn-g';rb.style.marginLeft='4px';rb.textContent='還原';rb.onclick=()=>restoreProject(p);tdAct.appendChild(rb);
     }
   });
@@ -1073,7 +1074,7 @@ async function openImportProject(){
 
 async function openEditProject(p){
   if(!boards.length) boards=await fetch('/api/boards').then(r=>r.json()).catch(()=>[]);
-  editingPid=p.project_id;
+  editingPid=p.project_id; editingOrigStatus=p.status||'active';
   document.getElementById('pdlgT').textContent='編輯專案';
   document.getElementById('pName').value=p.name||'';
   document.getElementById('pNotes').value=p.notes||'';
@@ -1105,6 +1106,9 @@ async function saveProject(){
     res=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   } else {
     const status=document.getElementById('pStatus').value;
+    if(status==='archived' && editingOrigStatus!=='archived'){
+      if(!confirm('將「'+name+'」設為「已封存」會：\n\n・把 NAS 資料夾從「00. 執行中案場/」搬到「archived/」\n・停止所有通知推播\n・客戶無法再查詢此專案進度\n\n稍後可在列表上按「還原」回復。確定要封存嗎？')) return;
+    }
     const sel=document.getElementById('pNasPath');
     const v=sel.value;
     let nas_path=null;
