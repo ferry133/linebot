@@ -403,16 +403,18 @@ def create_project():
     nas_path = None
     nas_warning = None
     if import_existing:
-        if not case_number:
-            return jsonify({"error": "case_number (folder) is required for import"}), 400
-        candidate = case_number if case_number.startswith("/") else os.path.join(NAS_ACTIVE_PATH, case_number)
+        folder = (body.get("nas_folder") or body.get("folder") or "").strip()
+        if not folder:
+            return jsonify({"error": "nas_folder is required for import"}), 400
+        candidate = folder if folder.startswith("/") else os.path.join(NAS_ACTIVE_PATH, folder)
+        candidate = os.path.normpath(candidate)
         if not candidate.startswith(NAS_MOUNT_PATH):
             return jsonify({"error": f"路徑須位於 {NAS_MOUNT_PATH} 之下"}), 400
         if not os.path.isdir(candidate):
             return jsonify({"error": f"資料夾不存在：{candidate}"}), 400
         nas_path = candidate
-        if case_number.startswith("/"):
-            case_number = os.path.basename(case_number.rstrip("/"))
+        if not case_number:
+            case_number = _generate_case_number(datetime.date.today().year)
     else:
         if not case_number:
             case_number = _generate_case_number(datetime.date.today().year)
@@ -484,12 +486,14 @@ def update_project(project_id: str):
     if "nas_path" in updates:
         new_nas = (updates["nas_path"] or "").strip() or None
         if new_nas:
+            new_nas = os.path.normpath(new_nas)
             if not new_nas.startswith(NAS_MOUNT_PATH):
                 return jsonify({"error": f"nas_path 必須位於 {NAS_MOUNT_PATH} 之下"}), 400
             if not os.path.isdir(new_nas):
                 return jsonify({"error": f"資料夾不存在：{new_nas}"}), 400
         updates["nas_path"] = new_nas
 
+    nas_warning = None
     if "status" in updates:
         def _cur(conn):
             with conn.cursor() as cur:
@@ -500,17 +504,36 @@ def update_project(project_id: str):
             return jsonify({"error": "not found"}), 404
         old_status, old_nas = row
         new_status = updates["status"]
+
+        def _other_active_refs(path: str) -> int:
+            def _q(conn):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM projects "
+                        "WHERE nas_path = %s AND status != 'archived' AND project_id != %s::uuid",
+                        (path, project_id),
+                    )
+                    return cur.fetchone()[0]
+            return db_exec(_q) or 0
+
         if old_status != new_status:
             if new_status == "archived" and old_nas:
-                moved, err = _archive_nas_folder(old_nas)
-                if err:
-                    return jsonify({"error": err}), 500
-                updates["nas_path"] = moved
+                if _other_active_refs(old_nas) > 0:
+                    nas_warning = "folder still in use"
+                else:
+                    moved, err = _archive_nas_folder(old_nas)
+                    if err:
+                        return jsonify({"error": err}), 500
+                    updates["nas_path"] = moved
             elif old_status == "archived" and new_status == "active" and old_nas:
-                moved, err = _restore_nas_folder(old_nas)
-                if err:
-                    return jsonify({"error": err}), 500
-                updates["nas_path"] = moved
+                # If folder physically still under active area (because other refs kept it there), just flip DB.
+                if old_nas.startswith(NAS_ACTIVE_PATH) and os.path.isdir(old_nas):
+                    nas_warning = "folder already in active area"
+                else:
+                    moved, err = _restore_nas_folder(old_nas)
+                    if err:
+                        return jsonify({"error": err}), 500
+                    updates["nas_path"] = moved
             elif old_status == "archived" and new_status == "completed":
                 return jsonify({"error": "請先還原為進行中後再標記已完成"}), 400
 
@@ -529,7 +552,10 @@ def update_project(project_id: str):
     rows = db_exec(_upd)
     if not rows:
         return jsonify({"error": "not found"}), 404
-    return jsonify({"ok": True})
+    resp = {"ok": True}
+    if nas_warning:
+        resp["nas_warning"] = nas_warning
+    return jsonify(resp)
 
 
 # ── Project-User Assignment API ───────────────────────────────────────────────
@@ -765,6 +791,9 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
       <select id="pFolderSelect" style="font-size:12px;flex:1"><option value="">（無）</option></select>
     </div>
     <p class="hint">案號將作為 NAS 資料夾名建立於「00. 執行中案場/」下；可自訂如 115-001-XX公館</p></div>
+  <div class="field" id="pImportCaseField" style="display:none"><label class="lbl">案號（選填）</label>
+    <input type="text" id="pImportCase" placeholder="留空自動生成 115年第N案">
+    <p class="hint">同一資料夾可被多個專案共用，請輸入獨立案號（或留空 auto-gen）</p></div>
   <div class="field">
     <label class="lbl">Trello 看板</label>
     <select id="pBoard"><option value="">（不指定）</option></select>
@@ -1018,6 +1047,7 @@ async function openAddProject(){
   document.getElementById('pFolderField').style.display='';
   document.getElementById('pFolder').style.display='';
   document.getElementById('pFolderSelectWrap').style.display='none';
+  document.getElementById('pImportCaseField').style.display='none';
   document.getElementById('pFolderField').querySelector('.hint').textContent='將在「00. 執行中案場/」下建立';
   document.getElementById('pEditFields').style.display='none';
   _fillBoardSelect(null);
@@ -1060,10 +1090,12 @@ async function openImportProject(){
   document.getElementById('pFolderField').style.display='';
   document.getElementById('pFolder').style.display='none';
   document.getElementById('pFolderSelectWrap').style.display='flex';
-  document.getElementById('pFolderField').querySelector('.hint').textContent='只列出尚未綁定專案的 NAS 資料夾；選擇後該資料夾名將作為案號';
+  document.getElementById('pFolderField').querySelector('.hint').textContent='同一資料夾可被多個專案共用';
+  document.getElementById('pImportCaseField').style.display='';
+  document.getElementById('pImportCase').value='';
   document.getElementById('pEditFields').style.display='none';
   _fillBoardSelect(null);
-  const d=await fetch('/api/nas/folders?unassigned=1').then(r=>r.json()).catch(()=>({base:'',folders:[]}));
+  const d=await fetch('/api/nas/folders').then(r=>r.json()).catch(()=>({base:'',folders:[]}));
   document.getElementById('pFolderBase').textContent=d.base||'';
   const sel=document.getElementById('pFolderSelect');
   while(sel.firstChild) sel.removeChild(sel.firstChild);
@@ -1079,6 +1111,7 @@ async function openEditProject(p){
   document.getElementById('pName').value=p.name||'';
   document.getElementById('pNotes').value=p.notes||'';
   document.getElementById('pFolderField').style.display='none';
+  document.getElementById('pImportCaseField').style.display='none';
   document.getElementById('pEditFields').style.display='';
   await _loadNasFolders(p.nas_path||'');
   document.getElementById('pNasHint').textContent='從「執行中案場」資料夾中選擇；改動不會影響 NAS 上的檔案';
@@ -1097,12 +1130,17 @@ async function saveProject(){
 
   let res;
   if(!editingPid){
-    const folder=importMode
-      ? document.getElementById('pFolderSelect').value
-      : document.getElementById('pFolder').value.trim();
-    if(importMode && !folder){alert('請選擇要匯入的 NAS 資料夾');return;}
-    const body={name,case_number:folder,trello_board_id:board_id,notes};
-    if(importMode) body.import_existing=true;
+    let body;
+    if(importMode){
+      const folder=document.getElementById('pFolderSelect').value;
+      if(!folder){alert('請選擇要匯入的 NAS 資料夾');return;}
+      const caseNum=document.getElementById('pImportCase').value.trim();
+      body={name,nas_folder:folder,trello_board_id:board_id,notes,import_existing:true};
+      if(caseNum) body.case_number=caseNum;
+    } else {
+      const folder=document.getElementById('pFolder').value.trim();
+      body={name,case_number:folder,trello_board_id:board_id,notes};
+    }
     res=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   } else {
     const status=document.getElementById('pStatus').value;
@@ -1119,7 +1157,15 @@ async function saveProject(){
   }
   const d=await res.json();
   if(!res.ok){alert(d.error||(d.nas_warning?'NAS 警告：'+d.nas_warning:'儲存失敗'));return;}
-  if(d.nas_warning) alert('注意：'+d.nas_warning);
+  if(d.nas_warning){
+    const msg={
+      'folder still in use':'資料夾仍有其他進行中專案使用，本次不搬移實體資料夾',
+      'folder already in active area':'實體資料夾已在執行中案場下（其他專案保留），僅更新狀態',
+      'template not found':'NAS 範本資料夾不存在，未建立資料夾',
+      'folder exists':'NAS 資料夾已存在',
+    }[d.nas_warning]||d.nas_warning;
+    alert('注意：'+msg);
+  }
   document.getElementById('pdlg').close();
   loadProjects();
 }
