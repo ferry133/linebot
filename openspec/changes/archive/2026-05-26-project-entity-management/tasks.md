@@ -64,8 +64,8 @@
 
 - [x] 11.1 NAS template 改用現有 SOP 資料夾：`C.公司SOP表單 and Check list/01.新開案資料夾：電腦檔案資料夾編號順序01.02.03`；`NAS_TEMPLATE_PATH` env var 預設值已更新
 - [x] 11.2 apply migration 004–007：在 `admin_server.py` 啟動時自動呼叫 `run_migrations()`；確認 004 的 alias_name 填入正確（larry/sa/yan），007 的遷移 WARNING log 列出孤兒 board_name
-- [ ] 11.3 透過 Admin UI 設定 larry/sa/yan 的 alias_name，確認唯一性驗證正常
-- [ ] 11.4 透過 Admin UI 建立一個測試專案，確認案號生成正確、NAS 資料夾建立、DB record 寫入
-- [ ] 11.5 透過 Admin UI assign customer user 至測試專案；以該 user 身分傳訊測試 RBAC 查詢走新路徑
-- [ ] 11.6 build & push 新 image，rollout restart；確認 NFS mount 成功
-- [ ] 11.7 驗證通知腳本（dry-run 或測試 board）能正確以 alias_name 解析收件人
+- [x] 11.3 透過 Admin UI 設定 larry/sa/yan 的 alias_name，確認唯一性驗證正常
+- [x] 11.4 透過 Admin UI 建立一個測試專案，確認案號生成正確、NAS 資料夾建立、DB record 寫入
+- [x] 11.5 透過 Admin UI assign customer user 至測試專案；以該 user 身分傳訊測試 RBAC 查詢走新路徑
+- [x] 11.6 build & push 新 image，rollout restart；確認 NFS mount 成功
+- [x] 11.7 驗證通知腳本（dry-run 或測試 board）能正確以 alias_name 解析收件人

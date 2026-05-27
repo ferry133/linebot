@@ -1,5 +1,6 @@
-## ADDED Requirements
-
+## Purpose
+角色與權限模型：定義 admin/employee/vendor/customer/visitor 五種角色及其資料查詢權限邊界。
+## Requirements
 ### Requirement: Role definitions
 系統 SHALL 支援五種角色，各角色對 Trello 專案的存取權限如下：
 
@@ -25,13 +26,18 @@
 - **THEN** 不向 trello-agent 發送 MQTT request
 
 ### Requirement: Permission lookup from DB
-系統 SHALL 在處理每則訊息時，從 `line_users` DB table 查詢該用戶的 role 與 projects，不得使用快取超過單次請求範圍。
+系統 SHALL 在處理每則訊息時，從 `line_user_projects` JOIN `projects` 查詢該用戶可存取的 trello_board_id 清單，不得使用 `line_users.projects` JSONB 欄位。
 
-#### Scenario: Permission check
+#### Scenario: Permission check via new table
 - **WHEN** customer-service-agent 準備呼叫 query_trello 工具
-- **THEN** 先查詢 `line_users` 取得 allowed_boards
-- **THEN** 將 allowed_boards 帶入 MQTT request 傳給 trello-agent
+- **THEN** 查詢 `SELECT p.trello_board_id FROM line_user_projects lup JOIN projects p ON lup.project_id = p.project_id WHERE lup.line_id = %s AND p.status = 'active'`
+- **THEN** 將 allowed_board_ids 帶入 MQTT request 傳給 trello-agent
 
 #### Scenario: User not in DB
 - **WHEN** line_id 不存在於 `line_users`（極少數情況，建檔失敗）
 - **THEN** 視為 visitor，回傳無權限訊息
+
+#### Scenario: Customer with no assigned projects
+- **WHEN** role=customer 但 line_user_projects 無對應記錄
+- **THEN** allowed_board_ids = []，視為無存取權限
+
