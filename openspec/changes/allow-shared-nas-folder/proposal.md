@@ -5,6 +5,7 @@
 ## What Changes
 
 - 解除「匯入既有專案」對 NAS 資料夾的綁定唯一性限制：列表顯示所有 `00. 執行中案場/` 下的資料夾，不再排除已被引用者。
+- 「編輯專案」dialog 的 NAS 資料夾下拉同樣 SHALL 列出所有 active 資料夾（與匯入共用同一個來源），且可改指到任何資料夾（含已被其他 project 引用者）。
 - 匯入流程下 `case_number` 與 `NAS 資料夾名` **解耦**：使用者可在 dialog 額外輸入案號；若留空則 auto-gen（沿用 `_generate_case_number`）。
 - 後端 `POST /api/projects` 匯入分支允許多筆 `projects.nas_path` 指向相同實體路徑。
 - **封存連動調整**：archived/restore 搬動 NAS 資料夾時，若仍有其他 active project 引用同一 `nas_path`，**不搬移實體資料夾**，僅更新 DB 狀態；最後一個引用切到 archived 時才搬。

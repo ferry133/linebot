@@ -21,4 +21,5 @@
 - [ ] 3.2 手動驗證 archive B 時資料夾未搬，response 有 nas_warning
 - [ ] 3.3 手動驗證再 archive A（最後一個 active 引用）時資料夾搬到 archived/
 - [ ] 3.4 手動驗證還原行為符合預期
+- [ ] 3.6 手動驗證編輯 dialog NAS 下拉列出全部資料夾，且可改指到已被其他 project 引用者
 - [ ] 3.5 build image、bump admin.yaml tag、push 觸發 Flux

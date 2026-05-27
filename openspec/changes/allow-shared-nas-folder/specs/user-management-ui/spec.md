@@ -21,6 +21,14 @@
 - **THEN** 送出 POST body 未含 case_number 或為空字串
 - **THEN** 後端 auto-gen `{民國年}年第N案`
 
+### Requirement: Edit dialog allows any NAS folder
+編輯既有專案 dialog 的「NAS 路徑」下拉 SHALL 列出 `00. 執行中案場/` 下所有資料夾（與匯入 dialog 同源），admin 可選擇任意資料夾，包含已被其他 project 引用者。後端 PUT `/api/projects/<id>` SHALL NOT 對 `nas_path` 做唯一性檢查。
+
+#### Scenario: Reassign edit to shared folder
+- **WHEN** admin 編輯 project B 並將 NAS 下拉改為已被 project A 引用的資料夾
+- **THEN** 儲存成功，B 的 `nas_path` 更新為該共用路徑
+- **THEN** A 不受影響
+
 ### Requirement: Archive warning when folder shared
 當 admin 將 project 切到 archived，且該專案的 NAS 資料夾仍被其他 active project 引用時，UI SHALL 顯示提示訊息說明資料夾未實際搬移。
 
