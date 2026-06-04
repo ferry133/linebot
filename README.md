@@ -142,14 +142,14 @@ PostgreSQL，migration 由 `shared/db.py` 啟動時自動執行。
 
 ## 部署（k8s）
 
-此 repo 只含應用程式碼，k8s manifests 在 **per-user repo**（如 `jgu5`）管理。
+此 repo 只含應用程式碼，k8s manifests 在 **per-user repo**（如 `jg-jiahd`）管理。
 
 ```bash
 # 推送映像（GitHub Actions 自動觸發）
 git push origin main
 # → GHCR: ghcr.io/ferry133/linebot:latest
 
-# 查看 linebot namespace 狀態（jgu5）
+# 查看 linebot namespace 狀態（jg-jiahd）
 KUBECONFIG=/path/to/kubeconfig-sa kubectl -n linebot get pods
 
 # 手動觸發 CronJob（例如 board sync）
