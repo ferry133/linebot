@@ -43,6 +43,7 @@ TRELLO_TIMEOUT = 30  # 秒
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
+MAX_TOKENS = 2048
 KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge")
 
 
@@ -297,16 +298,18 @@ class CustomerServiceAgent:
         for _ in range(MAX_TOOL_TURNS):
             response = self.client.messages.create(
                 model=MODEL,
-                max_tokens=1024,
+                max_tokens=MAX_TOKENS,
                 system=system,
                 messages=history + new_messages,
                 tools=TOOLS,
             )
             new_messages.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
 
-            if response.stop_reason == "end_turn":
+            # end_turn 為正常結束；max_tokens 代表答案被截斷，但仍要保留已生成的文字，
+            # 否則 final_text 會留空而誤觸「已通知專人跟進」fallback。
+            if response.stop_reason in ("end_turn", "max_tokens"):
                 for block in response.content:
-                    if hasattr(block, "text"):
+                    if hasattr(block, "text") and block.text:
                         final_text = block.text
                 break
 
