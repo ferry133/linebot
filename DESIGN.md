@@ -74,6 +74,31 @@ Act       → 執行工具（query_trello / get_project_photos / escalate_to_man
 Reflect   → 評估回答品質，寫入 episodes；若品質高，萃取 knowledge
 ```
 
+#### Reason/Act 迴圈與 `max_tokens` 處理（重要）
+
+`_reason_and_act()` 是一個最多 `MAX_TOOL_TURNS` 次的迴圈，每輪呼叫 Claude，
+依 `stop_reason` 決定下一步：
+
+| `stop_reason` | 處理 |
+|---------------|------|
+| `end_turn` | 正常結束，擷取 text block 為 `final_text`，跳出 |
+| `max_tokens` | 答案被輸出上限截斷，**仍要擷取已生成的 text 為 `final_text`**，跳出 |
+| `tool_use` | 執行工具、把結果接回 messages，續跑下一輪 |
+| 其他 | 跳出 |
+
+> ⚠️ **不要只認 `end_turn`。** 系統提示詞內嵌整個知識庫（約 2 萬字），Haiku
+> 很容易產生超過 `max_tokens` 的長回覆，此時 `stop_reason == "max_tokens"`。
+> 若只在 `end_turn` 時擷取文字，已生成的答案會被整個丟棄，`final_text` 留空，
+> 於是 `_run()` 回傳 fallback「抱歉，目前無法處理您的問題，已通知專人跟進。」——
+> 使用者會發現**每個需要長回覆的問題都被打回**。
+>
+> 配套：`MAX_TOKENS = 2048`（原為 1024，過低易截斷）。若仍常被截斷，可再調高。
+>
+> 除錯線索：log 的 `Reflected: quality=0.3` 即代表 `final_text` 為空
+> （`_evaluate` 對長度 ≤20 的回覆給 0.3），表示落入上述情況。
+>
+> 修正提交：`70af92a`（2026-06-04）。
+
 ### 3.2 工具定義
 
 | 工具 | 觸發時機 | 動作 |
