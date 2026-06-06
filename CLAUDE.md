@@ -118,11 +118,17 @@ linebot agents 使用**自己獨立的 PostgreSQL**（與 k8scc 分開），用 
 
 ## k8s 部署備註
 
-此 repo 只含應用程式碼，k8s manifests 需在 **per-user repo** 新增：
-- **Deployment**：`command: ["python", "/app/linebot_server.py"]`，`port: 8080`
-- **Service** + **HTTPRoute**（或 Ingress）：公開 Webhook URL
-- **Secret**：至少需要 `ANTHROPIC_API_KEY`、`LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_NOTIFY_GROUP_ID`、`TRELLO_API_KEY`、`TRELLO_TOKEN`
+此 repo 只含應用程式碼。k8s manifests 在 **`jg-base`**：`kubernetes/apps/extras/default/linebot/`
+（MQTT agents：`gateway/line_gateway.py`、`agents/customer_service.py`、`agents/trello_agent.py`、`agents/admin_server.py`）
+與 `.../trello-notifier/`（3 個通知 CronJob）。`linebot_server.py` 為 legacy 單體，已不部署。
+
+- **同一個 image，不同 `command`**：各 workload 用 `command` 指定執行哪支程式
+- **Secret**：至少 `ANTHROPIC_API_KEY`、`LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_NOTIFY_GROUP_ID`、`TRELLO_API_KEY`、`TRELLO_TOKEN`
 - **LINE Developer Console**：Webhook URL 設為 `https://<domain>/webhook`，啟用 webhook
+
+⚠️ **image sha 釘在 jg-base 多個檔案**（`linebot/app/deploy.yaml`、`trello-notifier/app/cronjobs.yaml`、
+`linebot/app/admin.yaml`）。release bump 時務必**全部一起改**，否則部分 workload 跑舊 image →
+症狀如「通知 0 收件人」（cronjobs 留在舊 sha、缺少新版 DB 收件人解析邏輯）。
 
 ## Trello 標記格式
 

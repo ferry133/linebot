@@ -142,19 +142,31 @@ PostgreSQL，migration 由 `shared/db.py` 啟動時自動執行。
 
 ## 部署（k8s）
 
-此 repo 只含應用程式碼，k8s manifests 在 **per-user repo**（如 `jg-jiahd`）管理。
+此 repo 只含應用程式碼。k8s manifests 放在 **`jg-base`**（共用 base repo）的
+`kubernetes/apps/extras/default/linebot/` 與 `.../trello-notifier/`；per-user repo
+（如 `jg-jiahd`）只負責「選用哪些 extras」與 `cluster-secrets`。
 
 ```bash
-# 推送映像（GitHub Actions 自動觸發）
+# 1. 推送程式碼 → GitHub Actions 自動 build & push（tag = 7 碼 git sha + latest）
 git push origin main
-# → GHCR: ghcr.io/ferry133/linebot:latest
+# → GHCR: ghcr.io/ferry133/linebot:<sha>, :latest
 
-# 查看 linebot namespace 狀態（jg-jiahd）
-KUBECONFIG=/path/to/kubeconfig-sa kubectl -n linebot get pods
+# 2. 在 jg-base 把 image sha bump 到新值（⚠️ 釘在多個檔案，必須一起改）
+#    否則會 drift：曾發生 cronjobs 留在舊 sha 而 deploy 已更新 → 通知 0 收件人
+KUBECONFIG=/path/to/kubeconfig-sa kubectl -n linebot get pods   # 查狀態
 
 # 手動觸發 CronJob（例如 board sync）
 KUBECONFIG=... kubectl -n linebot create job --from=cronjob/trello-board-sync trello-board-sync-manual
 ```
+
+**jg-base 中釘 `ghcr.io/ferry133/linebot` image 的檔案（release 時需一起 bump）：**
+
+| 檔案 | 內容 |
+|------|------|
+| `linebot/app/deploy.yaml` | gateway + customer-service + trello agents（4 處）|
+| `trello-notifier/app/cronjobs.yaml` | morning / noon / evening 通知（3 處）|
+| `linebot/app/admin.yaml` | admin web UI |
+| `linebot/app/migrate-contacts-job.yaml` | 一次性 migration（用 `:latest`）|
 
 LINE Developer Console：Webhook URL 設為 `https://<domain>/webhook`，啟用 webhook。
 
