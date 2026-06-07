@@ -60,12 +60,12 @@ agents/admin_server.py (port 8081)
 | `gateway/line_gateway.py` | LINE Webhook 接收 + MQTT 橋接（純 I/O，無 AI 邏輯） |
 | `agents/customer_service.py` | Claude AI 客服 Agent（五步循環：Perceive→Recall→Reason→Act→Reflect） |
 | `agents/trello_agent.py` | Trello 查詢 Agent（by customer_service 呼叫） |
-| `agents/admin_server.py` | 管理 Web UI：聯絡人、LINE 用戶 RBAC、工程案 CRUD、NAS 資料夾管理 |
+| `agents/admin_server.py` | 管理 Web UI：聯絡人、LINE 用戶 RBAC、工程案 CRUD、NAS 資料夾管理、業主/案場/型態結構化欄位與 `photo_folder` API（供 synology-photo-tagger 消費） |
 | `agents/trello_board_sync.py` | 每日同步 Trello 看板清單至 DB |
 | `trello_line_notifier.py` | 定時通知腳本（morning/noon/evening） |
 | `shared/broker.py` | MQTT wrapper（paho-mqtt v2） |
 | `shared/db.py` | PostgreSQL 連線池 + migration runner |
-| `migrations/` | DB schema migrations（001–007） |
+| `migrations/` | DB schema migrations（001–008） |
 | `knowledge/contacts.json` | 聯絡人清單（掛載自 NAS） |
 | `linebot_server.py` | 舊版單一 server（過渡期保留） |
 | `Dockerfile` | 容器映像建置，推至 GHCR |
@@ -100,8 +100,49 @@ PostgreSQL，migration 由 `shared/db.py` 啟動時自動執行。
 | `working_memory` | 對話 messages（per agent_id + thread_id） |
 | `trello_boards` | Trello 看板 ID ↔ 名稱，每日同步 |
 | `line_users` | LINE 用戶 RBAC（role: admin/employee/vendor/customer/visitor） |
-| `projects` | 工程案（case_number, Trello board, NAS path, status） |
+| `projects` | 工程案（case_number, name, Trello board, NAS path, status；`008` 加結構化欄位 `owner_name` / `site_name` / `project_type` + CHECK enum `{設計, 結構基礎, 室內裝修, 軟裝}`） |
 | `line_user_projects` | 用戶與工程案的多對多關係 |
+
+---
+
+## 工程案結構化欄位 / synology-photo-tagger 接口
+
+`migrations/008` 起，`projects` 表新增三個 nullable 欄位儲存案名的構成元素，方便 admin 用 drop-down 控制專案型態、並讓下游 `synology-photo-tagger` 直接取得短的相片資料夾 slug：
+
+| 欄位 | 範例 | 說明 |
+|------|------|------|
+| `owner_name` | `曾宇晟` | 業主姓名 |
+| `site_name`  | `大宅天景` | 案場名稱 |
+| `project_type` | `結構基礎` | 型態 enum：`設計` / `結構基礎` / `室內裝修` / `軟裝` |
+
+**Admin UI 輸入 → 自動 compose**：
+
+```
+業主名 (TEXT)  +  案場名 (TEXT)  +  型態 (drop-down)
+                       ↓
+name         = "{owner_name}-{site_name}-{project_type}"   ← 沿用既有 name 欄
+photo_folder = "{owner_name}-{site_name}"                  ← derived，不存 DB
+```
+
+`name` 由後端在三欄齊全時自動 compose；`photo_folder` 是 derived 欄位，只在 `GET /api/projects` / `GET /api/projects/<id>` response 中即時組裝回傳，不存 DB。
+
+**多對一**：同一個 `(owner_name, site_name)` 不同 `project_type` 可有多筆 project（例如 *曾宇晟-大宅天景* 同時有「設計」「結構基礎」「室內裝修」三案），三筆共用同一 `photo_folder = 曾宇晟-大宅天景` 與同一 NAS 文件資料夾。
+
+**`/api/projects` 多回的欄位**：
+
+```jsonc
+{
+  // ... 原本就有的欄位 ...
+  "owner_name":   "曾宇晟",        // nullable
+  "site_name":    "大宅天景",       // nullable
+  "project_type": "結構基礎",       // nullable, ∈ enum
+  "photo_folder": "曾宇晟-大宅天景"  // nullable, derived (any of owner/site missing → null)
+}
+```
+
+**下游接法**：`synology-photo-tagger` GPS-命中相片時，會拿 `photo_folder` 作為 `/photo/officephoto/<photo_folder>/YYYYMM/` 的 folder slug 自動 move 過去。三個欄位有任一缺漏 → `photo_folder = null` → 該案 fallback 到 manual 備份按鈕（向下相容）。
+
+**向下相容**：既有 row 三個欄位皆 null、`name` 保留原值，行為與 008 套用前完全一致。Admin 編輯既有 row 時 dialog 會顯示「請補充」橫幅提示。Spec 詳見 `openspec/specs/project-registry/spec.md` 末三條 Requirement。
 
 ---
 
