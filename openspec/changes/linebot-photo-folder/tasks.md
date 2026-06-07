@@ -19,7 +19,7 @@
 - [ ] 3.2 三欄位皆有值時，dialog 顯示「名稱會是：{owner}-{site}-{type}」preview
 - [ ] 3.3 submit 改成送 `owner_name` / `site_name` / `project_type`，不再送 `name`（或留 fallback：當三欄位為空，沿用舊 `name` input）
 - [ ] 3.4 編輯既有 row：若三欄位皆 null，dialog 頂端顯示「請補充」橫幅；可只填部分欄位送出
-- [ ] 3.5 list table 多加一欄 `photo_folder` 永久顯示（位於 `名稱` 與 `NAS 資料夾` 之間），便於 admin 一眼核對 synology-photo-tagger 會用到的 folder slug
+- [ ] 3.5 list table 多加一欄「相片資料夾」永久顯示（在 `Trello 看板` 與 `NAS 資料夾` 之間，顯示 derived `photo_folder` 值），便於 admin 一眼核對 synology-photo-tagger 會用到的 folder slug
 
 ## 4. 驗證 & 部署
 

@@ -814,7 +814,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
       <button class="btn btn-b" onclick="loadProjects()">重新整理</button>
     </div>
     <table>
-      <thead><tr><th>名稱</th><th>photo_folder</th><th>Trello 看板</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
+      <thead><tr><th>名稱</th><th>Trello 看板</th><th>相片資料夾</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
       <tbody id="ptb"><tr><td colspan="8" class="empty">載入中…</td></tr></tbody>
     </table>
   </div>
@@ -1120,10 +1120,10 @@ function renderProjects(projects){
   projects.forEach(p=>{
     const tr=tb.insertRow();tr.className='proj-row';
     tr.insertCell().textContent=p.name||'—';
+    tr.insertCell().textContent=p.board_name||'—';
     const tdPf=tr.insertCell();
     if(p.photo_folder){tdPf.textContent=p.photo_folder;tdPf.style.fontSize='12px';}
     else{tdPf.textContent='—';tdPf.style.color='#999';tdPf.style.fontSize='12px';tdPf.title='請補業主 / 案場 / 型態三欄';}
-    tr.insertCell().textContent=p.board_name||'—';
     const tdNas=tr.insertCell();tdNas.style.cssText='font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis';tdNas.title=p.nas_path||'';tdNas.textContent=p.nas_path?p.nas_path.split('/').pop():'—';
     const tdSt=tr.insertCell();
     const sb=document.createElement('span');sb.className='badge '+(STATUS_CLS[p.status]||'bv');sb.textContent=STATUS_LABEL[p.status]||p.status;tdSt.appendChild(sb);
