@@ -338,6 +338,46 @@ def _validate_gps(body) -> tuple[dict, tuple | None]:
     return {"gps_lat": lat, "gps_lng": lng, "gps_radius_m": radius}, None
 
 
+SITE_LEVEL_FIELDS = ("gps_lat", "gps_lng", "gps_radius_m", "nas_path")
+
+
+def _upsert_site(cur, owner_name, site_name, fields):
+    """Find or create a sites row keyed by (owner_name, site_name) and apply
+    any caller-provided site-level fields.
+
+    `fields` is a dict of {column_name: value} containing only the columns
+    the caller explicitly wants written. `None` in a value clears that
+    column; columns not in the dict are left untouched. This lets PUT
+    selectively clear GPS while not requiring every caller to think about
+    every field.
+
+    Both owner_name and site_name are required and must be non-empty.
+    Returns the sites.id.
+    """
+    cur.execute(
+        "INSERT INTO sites (owner_name, site_name) VALUES (%s, %s) "
+        "ON CONFLICT (owner_name, site_name) DO NOTHING",
+        (owner_name, site_name),
+    )
+    cur.execute(
+        "SELECT id FROM sites WHERE owner_name = %s AND site_name = %s",
+        (owner_name, site_name),
+    )
+    site_id = cur.fetchone()[0]
+
+    if fields:
+        col_names = [k for k in fields if k in SITE_LEVEL_FIELDS]
+        if col_names:
+            set_parts = [f"{k} = %s" for k in col_names]
+            set_parts.append("updated_at = now()")
+            params = [fields[k] for k in col_names] + [site_id]
+            cur.execute(
+                "UPDATE sites SET " + ", ".join(set_parts) + " WHERE id = %s",
+                params,
+            )
+    return site_id
+
+
 def _generate_case_number(year: int) -> str:
     roc_year = year - 1911
     def _q(conn):
@@ -441,13 +481,19 @@ def list_projects():
         with conn.cursor() as cur:
             sql = (
                 "SELECT p.project_id, p.case_number, p.name, p.trello_board_id, "
-                "tb.board_name, p.nas_path, p.status, p.notes, p.started_at, "
+                "tb.board_name, "
+                "COALESCE(s.nas_path,     p.nas_path)     AS nas_path, "
+                "p.status, p.notes, p.started_at, "
                 "p.completed_at, p.created_at, p.updated_at, "
                 "p.owner_name, p.site_name, p.project_type, "
-                "p.gps_lat, p.gps_lng, p.gps_radius_m, "
+                "COALESCE(s.gps_lat,      p.gps_lat)      AS gps_lat, "
+                "COALESCE(s.gps_lng,      p.gps_lng)      AS gps_lng, "
+                "COALESCE(s.gps_radius_m, p.gps_radius_m) AS gps_radius_m, "
+                "p.site_id, "
                 "count(lup.line_id) AS member_count "
                 "FROM projects p "
                 "LEFT JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
+                "LEFT JOIN sites s ON s.id = p.site_id "
                 "LEFT JOIN line_user_projects lup ON lup.project_id = p.project_id "
                 "WHERE 1=1"
             )
@@ -459,7 +505,7 @@ def list_projects():
                 roc_year = int(year_filter) - 1911
                 sql += " AND p.case_number LIKE %s"
                 params.append(f"{roc_year}年%")
-            sql += " GROUP BY p.project_id, tb.board_name ORDER BY p.created_at DESC"
+            sql += " GROUP BY p.project_id, tb.board_name, s.id ORDER BY p.created_at DESC"
             cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -536,14 +582,32 @@ def create_project():
 
     def _insert(conn):
         with conn.cursor() as cur:
+            # Site-level fields live on the sites table when (owner, site) is
+            # available. Both projects.site_id and the legacy projects.{gps_*,
+            # nas_path} columns are written for one-release back-compat.
+            site_id = None
+            if owner_name and site_name:
+                # Only propagate explicitly user-provided GPS to sites; the
+                # derived nas_path stays on projects for now (see design D7).
+                # A brand-new site will still get its first nas_path on the
+                # first admin edit via PUT.
+                site_fields = {}
+                if "gps_lat" in body:
+                    site_fields["gps_lat"] = gps_lat
+                if "gps_lng" in body:
+                    site_fields["gps_lng"] = gps_lng
+                if "gps_radius_m" in body:
+                    site_fields["gps_radius_m"] = gps_radius_m
+                site_id = _upsert_site(cur, owner_name, site_name, site_fields)
+
             cur.execute(
                 "INSERT INTO projects (case_number, name, trello_board_id, nas_path, notes, "
                 "owner_name, site_name, project_type, "
-                "gps_lat, gps_lng, gps_radius_m) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING project_id",
+                "gps_lat, gps_lng, gps_radius_m, site_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING project_id",
                 (case_number, name, trello_board_id, nas_path, notes,
                  owner_name, site_name, project_type,
-                 gps_lat, gps_lng, gps_radius_m),
+                 gps_lat, gps_lng, gps_radius_m, site_id),
             )
             return str(cur.fetchone()[0])
 
@@ -565,12 +629,18 @@ def get_project(project_id: str):
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT p.project_id, p.case_number, p.name, p.trello_board_id, "
-                "tb.board_name, p.nas_path, p.status, p.notes, p.started_at, "
+                "tb.board_name, "
+                "COALESCE(s.nas_path,     p.nas_path)     AS nas_path, "
+                "p.status, p.notes, p.started_at, "
                 "p.completed_at, p.created_at, p.updated_at, "
                 "p.owner_name, p.site_name, p.project_type, "
-                "p.gps_lat, p.gps_lng, p.gps_radius_m "
+                "COALESCE(s.gps_lat,      p.gps_lat)      AS gps_lat, "
+                "COALESCE(s.gps_lng,      p.gps_lng)      AS gps_lng, "
+                "COALESCE(s.gps_radius_m, p.gps_radius_m) AS gps_radius_m, "
+                "p.site_id "
                 "FROM projects p "
                 "LEFT JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
+                "LEFT JOIN sites s ON s.id = p.site_id "
                 "WHERE p.project_id = %s::uuid",
                 (project_id,),
             )
@@ -725,9 +795,45 @@ def update_project(project_id: str):
 
     def _upd(conn):
         with conn.cursor() as cur:
-            set_parts = [f"{k} = %s" for k in updates]
-            params = list(updates.values())
-            if updates.get("status") == "archived":
+            # Read the project's current site identity so we can decide
+            # whether to keep the existing sites row, switch to a different
+            # one, or attach to a fresh one.
+            cur.execute(
+                "SELECT owner_name, site_name, site_id "
+                "FROM projects WHERE project_id = %s::uuid",
+                (project_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return 0
+            cur_owner, cur_site, cur_site_id = row
+
+            effective_owner = updates.get("owner_name", cur_owner)
+            effective_site  = updates.get("site_name",  cur_site)
+
+            # Build the dict of site-level field overrides explicitly sent
+            # in this PUT (so we propagate clears too).
+            site_field_overrides = {
+                k: updates[k] for k in SITE_LEVEL_FIELDS if k in updates
+            }
+
+            local_updates = dict(updates)
+
+            if effective_owner and effective_site:
+                new_site_id = _upsert_site(
+                    cur,
+                    effective_owner,
+                    effective_site,
+                    site_field_overrides,
+                )
+                if new_site_id != cur_site_id:
+                    local_updates["site_id"] = new_site_id
+            # else: project is becoming or staying legacy (no site).
+            # Don't touch site_id here; leave whatever was there.
+
+            set_parts = [f"{k} = %s" for k in local_updates]
+            params = list(local_updates.values())
+            if local_updates.get("status") == "archived":
                 set_parts.append("completed_at = now()")
             set_parts.append("updated_at = now()")
             sql = "UPDATE projects SET " + ", ".join(set_parts) + " WHERE project_id = %s::uuid"
@@ -1022,6 +1128,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
   <div class="field"><label class="lbl">備註</label><textarea id="pNotes" rows="2"></textarea></div>
   <div class="field" id="pGpsField">
     <label class="lbl">GPS 中心點與半徑 <span class="hint" style="color:#888">（用於 synophoto tagger 自動命名 / 歸檔；不填則此案不自動）</span></label>
+    <div class="hint" style="font-size:11px;color:#6b7280;margin-bottom:6px">⚙️ 此欄位屬於案場（業主-案場）。同案場不同 project type 共用同一組值。</div>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
       <input type="number" step="0.000001" id="pGpsLat" placeholder="緯度" style="flex:1;min-width:120px">
       <input type="number" step="0.000001" id="pGpsLng" placeholder="經度" style="flex:1;min-width:120px">
@@ -1036,6 +1143,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
   <!-- Edit-only fields -->
   <div id="pEditFields" style="display:none">
     <div class="field"><label class="lbl">NAS 路徑</label>
+      <div class="hint" style="font-size:11px;color:#6b7280;margin-bottom:6px">⚙️ 此欄位屬於案場（業主-案場）。同案場不同 project type 共用同一個 NAS 資料夾。</div>
       <div style="display:flex;align-items:center;gap:6px">
         <span id="pNasBase" style="font-size:11px;color:#888;white-space:nowrap"></span>
         <span style="color:#888">/</span>
