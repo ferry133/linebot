@@ -100,7 +100,8 @@ PostgreSQL，migration 由 `shared/db.py` 啟動時自動執行。
 | `working_memory` | 對話 messages（per agent_id + thread_id） |
 | `trello_boards` | Trello 看板 ID ↔ 名稱，每日同步 |
 | `line_users` | LINE 用戶 RBAC（role: admin/employee/vendor/customer/visitor） |
-| `projects` | 工程案（case_number, name, Trello board, NAS path, status；`008` 加結構化欄位 `owner_name` / `site_name` / `project_type` + CHECK enum `{設計, 結構基礎, 室內裝修, 軟裝}`；`009` 加 `gps_lat` / `gps_lng` / `gps_radius_m`，作為 synology-photo-tagger 的 source of truth） |
+| `projects` | 工程案（case_number, name, Trello board, status；`008` 加結構化欄位 `owner_name` / `site_name` / `project_type` + CHECK enum `{設計, 結構基礎, 室內裝修, 軟裝}`；`009` 加 GPS 三欄、`010` 加 `site_id` FK，site-level 欄位（GPS + nas_path）改由 `sites` table 持有；舊 GPS 與 `nas_path` 四欄留 1 release 作 back-compat） |
+| `sites` | 案場屬性（`010` 新增；key=(owner_name, site_name) UNIQUE；持有 `gps_lat` / `gps_lng` / `gps_radius_m` / `nas_path`）；同案場不同 project_type 共用一筆 sites row |
 | `line_user_projects` | 用戶與工程案的多對多關係 |
 
 ---
@@ -147,7 +148,15 @@ photo_folder = "{owner_name}-{site_name}"                  ← derived，不存 
 
 **Admin UI 上傳 sample 相片自動萃取 GPS**：表單可以上傳一張 JPEG / HEIC 案場現場照片，後端透過 `POST /api/projects/extract-gps`（用 `pillow` + `pillow-heif`）讀 EXIF GPS，回傳 `{lat, lng}` 自動帶入經緯度欄位。
 
-**向下相容**：既有 row 三個欄位皆 null、`name` 保留原值，行為與 008 套用前完全一致；未填 GPS 的案在 synophoto 端不會被命中。Admin 編輯既有 row 時 dialog 會顯示「請補充」橫幅提示。GPS 是 per 物理案場、共用同 `nas_path` 的多個 project row（業主-案場-設計 / -結構基礎 / -室內裝修）填同一組 GPS 即可。
+**向下相容**：既有 row 三個欄位皆 null、`name` 保留原值，行為與 008 套用前完全一致；未填 GPS 的案在 synophoto 端不會被命中。Admin 編輯既有 row 時 dialog 會顯示「請補充」橫幅提示。
+
+### Site-level 欄位規範化（migration 010）
+
+GPS 三欄與 `nas_path` 在 `010` 起搬到新 `sites` table（key=(owner_name, site_name)）。同案場不同 `project_type` 的多個 project rows 共用同一筆 sites row、admin 填一次 GPS 同案場全部 project rows 立刻看到。
+
+- 寫入：`POST/PUT /api/projects` 帶 site-level 欄位時，後端自動 upsert sites 並把 `projects.site_id` 連起來；GPS 的 clear / 修改也會自動 propagate 給同 site 的 sibling projects
+- 讀取：`GET /api/projects` 用 `LEFT JOIN sites + COALESCE(sites, projects)` 取值，response 欄位與位置不變（synophoto 端 0 改動）
+- `projects` 上原本的 `gps_lat / gps_lng / gps_radius_m / nas_path` 四欄留作 1 release 的 back-compat 副本；下個小 change 才 drop
 
 ---
 
