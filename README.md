@@ -112,8 +112,8 @@ PostgreSQL，migration 由 `shared/db.py` 啟動時自動執行。
 
 | 欄位 | 範例 | 說明 |
 |------|------|------|
-| `owner_name` | `曾宇晟` | 業主姓名 |
-| `site_name`  | `大宅天景` | 案場名稱 |
+| `owner_name` | `曾宇晟` | 業主姓名（migration `010` 起：與 `site_name` 共同當作 `sites` row 的鍵） |
+| `site_name`  | `大宅天景` | 案場名稱（同上） |
 | `project_type` | `結構基礎` | 型態 enum：`設計` / `結構基礎` / `室內裝修` / `軟裝` |
 
 **Admin UI 輸入 → 自動 compose**：
