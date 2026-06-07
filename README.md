@@ -100,7 +100,7 @@ PostgreSQL，migration 由 `shared/db.py` 啟動時自動執行。
 | `working_memory` | 對話 messages（per agent_id + thread_id） |
 | `trello_boards` | Trello 看板 ID ↔ 名稱，每日同步 |
 | `line_users` | LINE 用戶 RBAC（role: admin/employee/vendor/customer/visitor） |
-| `projects` | 工程案（case_number, name, Trello board, NAS path, status；`008` 加結構化欄位 `owner_name` / `site_name` / `project_type` + CHECK enum `{設計, 結構基礎, 室內裝修, 軟裝}`） |
+| `projects` | 工程案（case_number, name, Trello board, NAS path, status；`008` 加結構化欄位 `owner_name` / `site_name` / `project_type` + CHECK enum `{設計, 結構基礎, 室內裝修, 軟裝}`；`009` 加 `gps_lat` / `gps_lng` / `gps_radius_m`，作為 synology-photo-tagger 的 source of truth） |
 | `line_user_projects` | 用戶與工程案的多對多關係 |
 
 ---
@@ -136,13 +136,18 @@ photo_folder = "{owner_name}-{site_name}"                  ← derived，不存 
   "owner_name":   "曾宇晟",        // nullable
   "site_name":    "大宅天景",       // nullable
   "project_type": "結構基礎",       // nullable, ∈ enum
-  "photo_folder": "曾宇晟-大宅天景"  // nullable, derived (any of owner/site missing → null)
+  "photo_folder": "曾宇晟-大宅天景", // nullable, derived (any of owner/site missing → null)
+  "gps_lat":      24.814761,       // nullable (REAL)
+  "gps_lng":      121.015822,      // nullable (REAL)
+  "gps_radius_m": 50               // nullable (INT, default 50)
 }
 ```
 
-**下游接法**：`synology-photo-tagger` GPS-命中相片時，會拿 `photo_folder` 作為 `/photo/officephoto/<photo_folder>/YYYYMM/` 的 folder slug 自動 move 過去。三個欄位有任一缺漏 → `photo_folder = null` → 該案 fallback 到 manual 備份按鈕（向下相容）。
+**下游接法**：`synology-photo-tagger` 啟動時呼叫 `GET /api/projects` 拉一次、寫到 PVC cache；之後對 GPS-含-有的 cluster centroid 做 haversine 命中查詢，命中後用 `photo_folder` 作為 `/photo/officephoto/<photo_folder>/YYYYMM/` 的 folder slug 與 tag name。linebot 不可達時 fallback 到 PVC cache。
 
-**向下相容**：既有 row 三個欄位皆 null、`name` 保留原值，行為與 008 套用前完全一致。Admin 編輯既有 row 時 dialog 會顯示「請補充」橫幅提示。Spec 詳見 `openspec/specs/project-registry/spec.md` 末三條 Requirement。
+**Admin UI 上傳 sample 相片自動萃取 GPS**：表單可以上傳一張 JPEG / HEIC 案場現場照片，後端透過 `POST /api/projects/extract-gps`（用 `pillow` + `pillow-heif`）讀 EXIF GPS，回傳 `{lat, lng}` 自動帶入經緯度欄位。
+
+**向下相容**：既有 row 三個欄位皆 null、`name` 保留原值，行為與 008 套用前完全一致；未填 GPS 的案在 synophoto 端不會被命中。Admin 編輯既有 row 時 dialog 會顯示「請補充」橫幅提示。GPS 是 per 物理案場、共用同 `nas_path` 的多個 project row（業主-案場-設計 / -結構基礎 / -室內裝修）填同一組 GPS 即可。
 
 ---
 
