@@ -250,6 +250,35 @@ def update_user(line_id: str):
 
 # ── Projects helpers ──────────────────────────────────────────────────────────
 
+PROJECT_TYPES = ("設計", "結構基礎", "室內裝修", "軟裝")
+
+
+def _photo_folder(owner: str | None, site: str | None) -> str | None:
+    """Derive the synology-photo-tagger folder slug from structured fields."""
+    if owner and site:
+        return f"{owner}-{site}"
+    return None
+
+
+def _compose_name(owner: str | None, site: str | None, ptype: str | None) -> str | None:
+    """Return `{owner}-{site}-{type}` when all three present, else None."""
+    if owner and site and ptype:
+        return f"{owner}-{site}-{ptype}"
+    return None
+
+
+def _validate_project_type(ptype):
+    """Return (cleaned, error_response_or_None)."""
+    if ptype is None or ptype == "":
+        return None, None
+    if ptype not in PROJECT_TYPES:
+        return None, (
+            jsonify({"error": f"project_type 必須是 {' / '.join(PROJECT_TYPES)} 之一"}),
+            400,
+        )
+    return ptype, None
+
+
 def _generate_case_number(year: int) -> str:
     roc_year = year - 1911
     def _q(conn):
@@ -355,6 +384,7 @@ def list_projects():
                 "SELECT p.project_id, p.case_number, p.name, p.trello_board_id, "
                 "tb.board_name, p.nas_path, p.status, p.notes, p.started_at, "
                 "p.completed_at, p.created_at, p.updated_at, "
+                "p.owner_name, p.site_name, p.project_type, "
                 "count(lup.line_id) AS member_count "
                 "FROM projects p "
                 "LEFT JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
@@ -384,6 +414,7 @@ def list_projects():
                 r[k] = r[k].isoformat()
         if r.get("project_id"):
             r["project_id"] = str(r["project_id"])
+        r["photo_folder"] = _photo_folder(r.get("owner_name"), r.get("site_name"))
     return jsonify(rows)
 
 
@@ -397,8 +428,21 @@ def create_project():
     notes = body.get("notes")
     import_existing = bool(body.get("import_existing"))
 
+    owner_name = (body.get("owner_name") or "").strip() or None
+    site_name = (body.get("site_name") or "").strip() or None
+    project_type, err = _validate_project_type(body.get("project_type"))
+    if err:
+        resp, code = err
+        return resp, code
+
+    # If all three structured fields are present, derive `name`; otherwise the
+    # caller must provide `name` directly (legacy path).
+    composed = _compose_name(owner_name, site_name, project_type)
+    if composed:
+        name = composed
+
     if not name:
-        return jsonify({"error": "name is required"}), 400
+        return jsonify({"error": "name is required (or supply owner_name + site_name + project_type)"}), 400
 
     nas_path = None
     nas_warning = None
@@ -425,9 +469,11 @@ def create_project():
     def _insert(conn):
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO projects (case_number, name, trello_board_id, nas_path, notes) "
-                "VALUES (%s, %s, %s, %s, %s) RETURNING project_id",
-                (case_number, name, trello_board_id, nas_path, notes),
+                "INSERT INTO projects (case_number, name, trello_board_id, nas_path, notes, "
+                "owner_name, site_name, project_type) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING project_id",
+                (case_number, name, trello_board_id, nas_path, notes,
+                 owner_name, site_name, project_type),
             )
             return str(cur.fetchone()[0])
 
@@ -450,7 +496,8 @@ def get_project(project_id: str):
             cur.execute(
                 "SELECT p.project_id, p.case_number, p.name, p.trello_board_id, "
                 "tb.board_name, p.nas_path, p.status, p.notes, p.started_at, "
-                "p.completed_at, p.created_at, p.updated_at "
+                "p.completed_at, p.created_at, p.updated_at, "
+                "p.owner_name, p.site_name, p.project_type "
                 "FROM projects p "
                 "LEFT JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
                 "WHERE p.project_id = %s::uuid",
@@ -467,6 +514,7 @@ def get_project(project_id: str):
         if r.get(k):
             r[k] = r[k].isoformat()
     r["project_id"] = str(r["project_id"])
+    r["photo_folder"] = _photo_folder(r.get("owner_name"), r.get("site_name"))
     return jsonify(r)
 
 
@@ -474,7 +522,8 @@ def get_project(project_id: str):
 @require_auth
 def update_project(project_id: str):
     body = request.get_json() or {}
-    allowed = {"name", "trello_board_id", "status", "notes", "nas_path"}
+    allowed = {"name", "trello_board_id", "status", "notes", "nas_path",
+               "owner_name", "site_name", "project_type"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         return jsonify({"error": "no valid fields"}), 400
@@ -482,6 +531,41 @@ def update_project(project_id: str):
     valid_statuses = {"active", "completed", "archived"}
     if "status" in updates and updates["status"] not in valid_statuses:
         return jsonify({"error": f"invalid status: {updates['status']}"}), 400
+
+    if "project_type" in updates:
+        cleaned, err = _validate_project_type(updates["project_type"])
+        if err:
+            resp, code = err
+            return resp, code
+        updates["project_type"] = cleaned
+
+    # Normalize blank strings → None for the structured fields
+    for k in ("owner_name", "site_name"):
+        if k in updates:
+            v = (updates[k] or "").strip()
+            updates[k] = v or None
+
+    # Re-compose `name` when all three structured fields end up non-null.
+    # We need the merged (current + update) view to decide.
+    if any(k in updates for k in ("owner_name", "site_name", "project_type")):
+        def _cur_structured(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT owner_name, site_name, project_type "
+                    "FROM projects WHERE project_id = %s::uuid",
+                    (project_id,),
+                )
+                return cur.fetchone()
+        existing = db_exec(_cur_structured)
+        if existing is None:
+            return jsonify({"error": "not found"}), 404
+        cur_owner, cur_site, cur_type = existing
+        new_owner = updates.get("owner_name", cur_owner)
+        new_site = updates.get("site_name", cur_site)
+        new_type = updates.get("project_type", cur_type)
+        composed = _compose_name(new_owner, new_site, new_type)
+        if composed and "name" not in updates:
+            updates["name"] = composed
 
     if "nas_path" in updates:
         new_nas = (updates["nas_path"] or "").strip() or None
@@ -730,8 +814,8 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
       <button class="btn btn-b" onclick="loadProjects()">重新整理</button>
     </div>
     <table>
-      <thead><tr><th>名稱</th><th>Trello 看板</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
-      <tbody id="ptb"><tr><td colspan="7" class="empty">載入中…</td></tr></tbody>
+      <thead><tr><th>名稱</th><th>photo_folder</th><th>Trello 看板</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
+      <tbody id="ptb"><tr><td colspan="8" class="empty">載入中…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -782,7 +866,22 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
 <!-- Add/edit project dialog -->
 <dialog id="pdlg">
   <h3 id="pdlgT">新增專案</h3>
-  <div class="field"><label class="lbl">專案名稱</label><input type="text" id="pName" placeholder="XX 公館裝修工程"></div>
+  <div id="pLegacyBanner" style="display:none;background:#fef3c7;border:1px solid #f59e0b;padding:8px;border-radius:4px;margin-bottom:10px;font-size:12px;color:#92400e">
+    此既有專案尚未補三個結構化欄位（業主 / 案場 / 型態）。補齊後 synology-photo-tagger 才能 auto-move 相片到 <code>/photo/officephoto/&lt;業主-案場&gt;/</code>。
+  </div>
+  <div class="field"><label class="lbl">業主姓名</label><input type="text" id="pOwner" placeholder="例：曾宇晟" oninput="_previewProjName()"></div>
+  <div class="field"><label class="lbl">案場名稱</label><input type="text" id="pSite" placeholder="例：大宅天景" oninput="_previewProjName()"></div>
+  <div class="field"><label class="lbl">專案型態</label>
+    <select id="pType" onchange="_previewProjName()">
+      <option value="">（未指定）</option>
+      <option value="設計">設計</option>
+      <option value="結構基礎">結構基礎</option>
+      <option value="室內裝修">室內裝修</option>
+      <option value="軟裝">軟裝</option>
+    </select>
+  </div>
+  <div id="pNamePreview" class="hint" style="margin-top:-4px;margin-bottom:8px;color:#0369a1"></div>
+  <div class="field"><label class="lbl">專案名稱</label><input type="text" id="pName" placeholder="三欄位齊全會自動組合；不齊全請手填"></div>
   <div class="field" id="pFolderField"><label class="lbl">案號（即 NAS 資料夾名）</label>
     <input type="text" id="pFolder" placeholder="留空自動生成 115年第N案">
     <div id="pFolderSelectWrap" style="display:none;align-items:center;gap:6px">
@@ -1016,11 +1115,14 @@ async function loadProjects(){
 
 function renderProjects(projects){
   const tb=document.getElementById('ptb');
-  if(!projects.length){tb.textContent='';const tr=tb.insertRow();const td=tr.insertCell();td.colSpan=7;td.className='empty';td.textContent='無資料';return;}
+  if(!projects.length){tb.textContent='';const tr=tb.insertRow();const td=tr.insertCell();td.colSpan=8;td.className='empty';td.textContent='無資料';return;}
   tb.textContent='';
   projects.forEach(p=>{
     const tr=tb.insertRow();tr.className='proj-row';
     tr.insertCell().textContent=p.name||'—';
+    const tdPf=tr.insertCell();
+    if(p.photo_folder){tdPf.textContent=p.photo_folder;tdPf.style.fontSize='12px';}
+    else{tdPf.textContent='—';tdPf.style.color='#999';tdPf.style.fontSize='12px';tdPf.title='請補業主 / 案場 / 型態三欄';}
     tr.insertCell().textContent=p.board_name||'—';
     const tdNas=tr.insertCell();tdNas.style.cssText='font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis';tdNas.title=p.nas_path||'';tdNas.textContent=p.nas_path?p.nas_path.split('/').pop():'—';
     const tdSt=tr.insertCell();
@@ -1034,6 +1136,29 @@ function renderProjects(projects){
       const rb=document.createElement('button');rb.className='btn btn-g';rb.style.marginLeft='4px';rb.textContent='還原';rb.onclick=()=>restoreProject(p);tdAct.appendChild(rb);
     }
   });
+}
+
+function _resetStructured(){
+  document.getElementById('pOwner').value='';
+  document.getElementById('pSite').value='';
+  document.getElementById('pType').value='';
+  document.getElementById('pLegacyBanner').style.display='none';
+  _previewProjName();
+}
+
+function _previewProjName(){
+  const o=document.getElementById('pOwner').value.trim();
+  const s=document.getElementById('pSite').value.trim();
+  const t=document.getElementById('pType').value;
+  const prev=document.getElementById('pNamePreview');
+  if(o&&s&&t){
+    prev.textContent='名稱會自動組合為：'+o+'-'+s+'-'+t+'　（photo_folder = '+o+'-'+s+'）';
+    document.getElementById('pName').value=o+'-'+s+'-'+t;
+  } else if(o||s||t){
+    prev.textContent='提示：三欄位齊全才會自動組合 name 並提供 photo_folder';
+  } else {
+    prev.textContent='';
+  }
 }
 
 async function openAddProject(){
@@ -1050,6 +1175,7 @@ async function openAddProject(){
   document.getElementById('pImportCaseField').style.display='none';
   document.getElementById('pFolderField').querySelector('.hint').textContent='將在「00. 執行中案場/」下建立';
   document.getElementById('pEditFields').style.display='none';
+  _resetStructured();
   _fillBoardSelect(null);
   document.getElementById('pdlg').showModal();
 }
@@ -1087,6 +1213,7 @@ async function openImportProject(){
   document.getElementById('pdlgT').textContent='匯入既有專案（不會建立 NAS 資料夾）';
   document.getElementById('pName').value='';
   document.getElementById('pNotes').value='';
+  _resetStructured();
   document.getElementById('pFolderField').style.display='';
   document.getElementById('pFolder').style.display='none';
   document.getElementById('pFolderSelectWrap').style.display='flex';
@@ -1113,6 +1240,12 @@ async function openEditProject(p){
   document.getElementById('pFolderField').style.display='none';
   document.getElementById('pImportCaseField').style.display='none';
   document.getElementById('pEditFields').style.display='';
+  document.getElementById('pOwner').value=p.owner_name||'';
+  document.getElementById('pSite').value=p.site_name||'';
+  document.getElementById('pType').value=p.project_type||'';
+  const allMissing=!p.owner_name && !p.site_name && !p.project_type;
+  document.getElementById('pLegacyBanner').style.display=allMissing?'':'none';
+  _previewProjName();
   await _loadNasFolders(p.nas_path||'');
   document.getElementById('pNasHint').textContent='從「執行中案場」資料夾中選擇；改動不會影響 NAS 上的檔案';
   document.getElementById('pStatus').value=p.status||'active';
@@ -1122,11 +1255,23 @@ async function openEditProject(p){
   document.getElementById('pdlg').showModal();
 }
 
+function _structuredPayload(){
+  const o=document.getElementById('pOwner').value.trim()||null;
+  const s=document.getElementById('pSite').value.trim()||null;
+  const t=document.getElementById('pType').value||null;
+  return {owner_name:o, site_name:s, project_type:t};
+}
+
 async function saveProject(){
-  const name=document.getElementById('pName').value.trim();
-  if(!name){alert('請填寫專案名稱');return;}
+  const owner=document.getElementById('pOwner').value.trim();
+  const site=document.getElementById('pSite').value.trim();
+  const ptype=document.getElementById('pType').value;
+  const allStructured=owner && site && ptype;
+  const name=allStructured ? (owner+'-'+site+'-'+ptype) : document.getElementById('pName').value.trim();
+  if(!name){alert('請填寫專案名稱（或補齊業主 / 案場 / 型態三欄）');return;}
   const board_id=document.getElementById('pBoard').value||null;
   const notes=document.getElementById('pNotes').value.trim()||null;
+  const structured=_structuredPayload();
 
   let res;
   if(!editingPid){
@@ -1135,11 +1280,11 @@ async function saveProject(){
       const folder=document.getElementById('pFolderSelect').value;
       if(!folder){alert('請選擇要匯入的 NAS 資料夾');return;}
       const caseNum=document.getElementById('pImportCase').value.trim();
-      body={name,nas_folder:folder,trello_board_id:board_id,notes,import_existing:true};
+      body={name,nas_folder:folder,trello_board_id:board_id,notes,import_existing:true,...structured};
       if(caseNum) body.case_number=caseNum;
     } else {
       const folder=document.getElementById('pFolder').value.trim();
-      body={name,case_number:folder,trello_board_id:board_id,notes};
+      body={name,case_number:folder,trello_board_id:board_id,notes,...structured};
     }
     res=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   } else {
@@ -1152,7 +1297,7 @@ async function saveProject(){
     let nas_path=null;
     if(v==='__keep__') nas_path=sel.dataset.keepFull||null;
     else if(v) nas_path=(nasBase?nasBase+'/':'')+v;
-    const body={name,trello_board_id:board_id,status,notes,nas_path};
+    const body={name,trello_board_id:board_id,status,notes,nas_path,...structured};
     res=await fetch('/api/projects/'+encodeURIComponent(editingPid),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   }
   const d=await res.json();
