@@ -36,6 +36,7 @@ MIGRATIONS = [
     "006_line_user_projects.sql",
     "007_migrate_jsonb_projects.sql",
     "008_project_photo_folder.sql",
+    "009_project_gps.sql",
 ]
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent / "migrations"

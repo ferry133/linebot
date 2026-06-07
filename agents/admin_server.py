@@ -22,6 +22,7 @@ import datetime
 from flask import Flask, request, jsonify, Response
 from shared.log import setup as _setup_log
 from shared.db import db_exec, run_migrations
+from shared.exif_gps import extract_gps as _exif_extract_gps
 
 _setup_log()
 log = logging.getLogger(__name__)
@@ -279,6 +280,64 @@ def _validate_project_type(ptype):
     return ptype, None
 
 
+def _coerce_optional_float(v):
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return _BAD
+
+
+def _coerce_optional_int(v):
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return _BAD
+
+
+_BAD = object()  # sentinel for "value present but un-coercible"
+
+
+def _validate_gps(body) -> tuple[dict, tuple | None]:
+    """Parse + validate gps_lat / gps_lng / gps_radius_m from a request body.
+
+    Returns (cleaned_dict, error_response_or_None).
+
+    Rules:
+    - All three fields are optional.
+    - lat & lng must both be present-or-both-absent.
+    - radius_m defaults to 50 when lat/lng present and radius missing.
+    - Ranges: lat -90..90, lng -180..180, radius 1..5000.
+    """
+    lat = _coerce_optional_float(body.get("gps_lat"))
+    lng = _coerce_optional_float(body.get("gps_lng"))
+    radius = _coerce_optional_int(body.get("gps_radius_m"))
+
+    if _BAD in (lat, lng, radius):
+        return {}, (jsonify({"error": "gps_lat / gps_lng / gps_radius_m 必須為數字"}), 400)
+
+    if (lat is None) != (lng is None):
+        return {}, (jsonify({"error": "gps_lat 與 gps_lng 必須同時提供或同時省略"}), 400)
+
+    if lat is not None:
+        if not (-90.0 <= lat <= 90.0):
+            return {}, (jsonify({"error": "gps_lat 須在 -90 ~ 90 之間"}), 400)
+        if not (-180.0 <= lng <= 180.0):
+            return {}, (jsonify({"error": "gps_lng 須在 -180 ~ 180 之間"}), 400)
+        if radius is None:
+            radius = 50
+        if not (1 <= radius <= 5000):
+            return {}, (jsonify({"error": "gps_radius_m 須在 1 ~ 5000 之間"}), 400)
+    else:
+        # lat/lng both absent — radius is meaningless; ignore.
+        radius = None
+
+    return {"gps_lat": lat, "gps_lng": lng, "gps_radius_m": radius}, None
+
+
 def _generate_case_number(year: int) -> str:
     roc_year = year - 1911
     def _q(conn):
@@ -385,6 +444,7 @@ def list_projects():
                 "tb.board_name, p.nas_path, p.status, p.notes, p.started_at, "
                 "p.completed_at, p.created_at, p.updated_at, "
                 "p.owner_name, p.site_name, p.project_type, "
+                "p.gps_lat, p.gps_lng, p.gps_radius_m, "
                 "count(lup.line_id) AS member_count "
                 "FROM projects p "
                 "LEFT JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
@@ -435,6 +495,14 @@ def create_project():
         resp, code = err
         return resp, code
 
+    gps_fields, err = _validate_gps(body)
+    if err:
+        resp, code = err
+        return resp, code
+    gps_lat = gps_fields["gps_lat"]
+    gps_lng = gps_fields["gps_lng"]
+    gps_radius_m = gps_fields["gps_radius_m"]
+
     # If all three structured fields are present, derive `name`; otherwise the
     # caller must provide `name` directly (legacy path).
     composed = _compose_name(owner_name, site_name, project_type)
@@ -470,10 +538,12 @@ def create_project():
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO projects (case_number, name, trello_board_id, nas_path, notes, "
-                "owner_name, site_name, project_type) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING project_id",
+                "owner_name, site_name, project_type, "
+                "gps_lat, gps_lng, gps_radius_m) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING project_id",
                 (case_number, name, trello_board_id, nas_path, notes,
-                 owner_name, site_name, project_type),
+                 owner_name, site_name, project_type,
+                 gps_lat, gps_lng, gps_radius_m),
             )
             return str(cur.fetchone()[0])
 
@@ -497,7 +567,8 @@ def get_project(project_id: str):
                 "SELECT p.project_id, p.case_number, p.name, p.trello_board_id, "
                 "tb.board_name, p.nas_path, p.status, p.notes, p.started_at, "
                 "p.completed_at, p.created_at, p.updated_at, "
-                "p.owner_name, p.site_name, p.project_type "
+                "p.owner_name, p.site_name, p.project_type, "
+                "p.gps_lat, p.gps_lng, p.gps_radius_m "
                 "FROM projects p "
                 "LEFT JOIN trello_boards tb ON tb.board_id = p.trello_board_id "
                 "WHERE p.project_id = %s::uuid",
@@ -523,10 +594,41 @@ def get_project(project_id: str):
 def update_project(project_id: str):
     body = request.get_json() or {}
     allowed = {"name", "trello_board_id", "status", "notes", "nas_path",
-               "owner_name", "site_name", "project_type"}
+               "owner_name", "site_name", "project_type",
+               "gps_lat", "gps_lng", "gps_radius_m"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         return jsonify({"error": "no valid fields"}), 400
+
+    if any(k in updates for k in ("gps_lat", "gps_lng", "gps_radius_m")):
+        # _validate_gps treats missing keys as None — for PUT we want partial
+        # updates to be additive on top of the row's current GPS, not "set the
+        # missing ones to null". So fetch current values and merge before
+        # validating.
+        def _cur_gps(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT gps_lat, gps_lng, gps_radius_m "
+                    "FROM projects WHERE project_id = %s::uuid",
+                    (project_id,),
+                )
+                return cur.fetchone()
+        cur_gps = db_exec(_cur_gps)
+        if cur_gps is None:
+            return jsonify({"error": "not found"}), 404
+        merged = {
+            "gps_lat": updates.get("gps_lat", cur_gps[0]),
+            "gps_lng": updates.get("gps_lng", cur_gps[1]),
+            "gps_radius_m": updates.get("gps_radius_m", cur_gps[2]),
+        }
+        gps_clean, err = _validate_gps(merged)
+        if err:
+            resp, code = err
+            return resp, code
+        # Only overwrite the keys the caller actually sent
+        for k in ("gps_lat", "gps_lng", "gps_radius_m"):
+            if k in updates:
+                updates[k] = gps_clean[k]
 
     valid_statuses = {"active", "completed", "archived"}
     if "status" in updates and updates["status"] not in valid_statuses:
@@ -640,6 +742,26 @@ def update_project(project_id: str):
     if nas_warning:
         resp["nas_warning"] = nas_warning
     return jsonify(resp)
+
+
+@app.post("/api/projects/extract-gps")
+@require_auth
+def extract_gps_endpoint():
+    """Read GPS EXIF from an uploaded JPEG or HEIC and return `{lat, lng}`.
+
+    Used by the project-management UI's "上傳 sample 相片自動萃取" button so
+    the user doesn't have to type coordinates. Per consolidate-project-registry
+    change: ownership of the EXIF extraction flow moved from synophoto to
+    linebot.
+    """
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify({"error": "請上傳檔案欄位 'file'"}), 400
+    try:
+        lat, lng = _exif_extract_gps(f.stream)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"lat": lat, "lng": lng})
 
 
 # ── Project-User Assignment API ───────────────────────────────────────────────
@@ -814,7 +936,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
       <button class="btn btn-b" onclick="loadProjects()">重新整理</button>
     </div>
     <table>
-      <thead><tr><th>名稱</th><th>Trello 看板</th><th>相片資料夾</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
+      <thead><tr><th>名稱</th><th>Trello 看板</th><th>相片資料夾</th><th>GPS</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
       <tbody id="ptb"><tr><td colspan="8" class="empty">載入中…</td></tr></tbody>
     </table>
   </div>
@@ -898,6 +1020,19 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
     <select id="pBoard"><option value="">（不指定）</option></select>
   </div>
   <div class="field"><label class="lbl">備註</label><textarea id="pNotes" rows="2"></textarea></div>
+  <div class="field" id="pGpsField">
+    <label class="lbl">GPS 中心點與半徑 <span class="hint" style="color:#888">（用於 synophoto tagger 自動命名 / 歸檔；不填則此案不自動）</span></label>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input type="number" step="0.000001" id="pGpsLat" placeholder="緯度" style="flex:1;min-width:120px">
+      <input type="number" step="0.000001" id="pGpsLng" placeholder="經度" style="flex:1;min-width:120px">
+      <input type="number" id="pGpsRadius" placeholder="半徑(m)" min="1" max="5000" value="50" style="width:90px">
+    </div>
+    <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input type="file" id="pGpsPhoto" accept="image/*,.heic,.HEIC">
+      <button class="btn btn-b" type="button" onclick="extractGpsFromPhoto()">從相片萃取 GPS</button>
+      <span id="pGpsStatus" style="font-size:11px;color:#666"></span>
+    </div>
+  </div>
   <!-- Edit-only fields -->
   <div id="pEditFields" style="display:none">
     <div class="field"><label class="lbl">NAS 路徑</label>
@@ -1115,7 +1250,7 @@ async function loadProjects(){
 
 function renderProjects(projects){
   const tb=document.getElementById('ptb');
-  if(!projects.length){tb.textContent='';const tr=tb.insertRow();const td=tr.insertCell();td.colSpan=8;td.className='empty';td.textContent='無資料';return;}
+  if(!projects.length){tb.textContent='';const tr=tb.insertRow();const td=tr.insertCell();td.colSpan=9;td.className='empty';td.textContent='無資料';return;}
   tb.textContent='';
   projects.forEach(p=>{
     const tr=tb.insertRow();tr.className='proj-row';
@@ -1124,6 +1259,13 @@ function renderProjects(projects){
     const tdPf=tr.insertCell();
     if(p.photo_folder){tdPf.textContent=p.photo_folder;tdPf.style.fontSize='12px';}
     else{tdPf.textContent='—';tdPf.style.color='#999';tdPf.style.fontSize='12px';tdPf.title='請補業主 / 案場 / 型態三欄';}
+    const tdGps=tr.insertCell();tdGps.style.fontSize='11px';
+    if(p.gps_lat!=null && p.gps_lng!=null){
+      tdGps.textContent=Number(p.gps_lat).toFixed(4)+', '+Number(p.gps_lng).toFixed(4);
+      tdGps.title='半徑 '+(p.gps_radius_m||50)+' m';
+    } else {
+      tdGps.textContent='—';tdGps.style.color='#999';tdGps.title='未設定 GPS — synophoto tagger 無法自動命名 / 歸檔此案';
+    }
     const tdNas=tr.insertCell();tdNas.style.cssText='font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis';tdNas.title=p.nas_path||'';tdNas.textContent=p.nas_path?p.nas_path.split('/').pop():'—';
     const tdSt=tr.insertCell();
     const sb=document.createElement('span');sb.className='badge '+(STATUS_CLS[p.status]||'bv');sb.textContent=STATUS_LABEL[p.status]||p.status;tdSt.appendChild(sb);
@@ -1144,6 +1286,49 @@ function _resetStructured(){
   document.getElementById('pType').value='';
   document.getElementById('pLegacyBanner').style.display='none';
   _previewProjName();
+}
+
+function _resetGps(){
+  document.getElementById('pGpsLat').value='';
+  document.getElementById('pGpsLng').value='';
+  document.getElementById('pGpsRadius').value='50';
+  document.getElementById('pGpsPhoto').value='';
+  document.getElementById('pGpsStatus').textContent='';
+}
+
+function _gpsPayload(){
+  const lat=document.getElementById('pGpsLat').value.trim();
+  const lng=document.getElementById('pGpsLng').value.trim();
+  const radius=document.getElementById('pGpsRadius').value.trim();
+  const out={};
+  if(lat!==''||lng!==''){
+    out.gps_lat = lat===''?null:parseFloat(lat);
+    out.gps_lng = lng===''?null:parseFloat(lng);
+    out.gps_radius_m = radius===''?50:parseInt(radius,10);
+  } else {
+    // Explicitly clear when editing and user removed coords
+    out.gps_lat = null;
+    out.gps_lng = null;
+    out.gps_radius_m = null;
+  }
+  return out;
+}
+
+async function extractGpsFromPhoto(){
+  const f=document.getElementById('pGpsPhoto').files[0];
+  const st=document.getElementById('pGpsStatus');
+  if(!f){st.textContent='請先選擇相片檔';st.style.color='#b00';return;}
+  st.textContent='萃取中…';st.style.color='#666';
+  const fd=new FormData();fd.append('file',f);
+  let res;
+  try{ res=await fetch('/api/projects/extract-gps',{method:'POST',body:fd}); }
+  catch(e){ st.textContent='連線失敗：'+e.message;st.style.color='#b00';return; }
+  const d=await res.json().catch(()=>({}));
+  if(!res.ok){st.textContent=d.error||'萃取失敗';st.style.color='#b00';return;}
+  document.getElementById('pGpsLat').value=d.lat;
+  document.getElementById('pGpsLng').value=d.lng;
+  st.textContent='已自 EXIF 取得座標 ('+d.lat.toFixed(6)+', '+d.lng.toFixed(6)+')';
+  st.style.color='#067a3a';
 }
 
 function _previewProjName(){
@@ -1176,6 +1361,7 @@ async function openAddProject(){
   document.getElementById('pFolderField').querySelector('.hint').textContent='將在「00. 執行中案場/」下建立';
   document.getElementById('pEditFields').style.display='none';
   _resetStructured();
+  _resetGps();
   _fillBoardSelect(null);
   document.getElementById('pdlg').showModal();
 }
@@ -1214,6 +1400,7 @@ async function openImportProject(){
   document.getElementById('pName').value='';
   document.getElementById('pNotes').value='';
   _resetStructured();
+  _resetGps();
   document.getElementById('pFolderField').style.display='';
   document.getElementById('pFolder').style.display='none';
   document.getElementById('pFolderSelectWrap').style.display='flex';
@@ -1246,6 +1433,10 @@ async function openEditProject(p){
   const allMissing=!p.owner_name && !p.site_name && !p.project_type;
   document.getElementById('pLegacyBanner').style.display=allMissing?'':'none';
   _previewProjName();
+  _resetGps();
+  if(p.gps_lat!=null){document.getElementById('pGpsLat').value=p.gps_lat;}
+  if(p.gps_lng!=null){document.getElementById('pGpsLng').value=p.gps_lng;}
+  if(p.gps_radius_m!=null){document.getElementById('pGpsRadius').value=p.gps_radius_m;}
   await _loadNasFolders(p.nas_path||'');
   document.getElementById('pNasHint').textContent='從「執行中案場」資料夾中選擇；改動不會影響 NAS 上的檔案';
   document.getElementById('pStatus').value=p.status||'active';
@@ -1272,6 +1463,7 @@ async function saveProject(){
   const board_id=document.getElementById('pBoard').value||null;
   const notes=document.getElementById('pNotes').value.trim()||null;
   const structured=_structuredPayload();
+  const gps=_gpsPayload();
 
   let res;
   if(!editingPid){
@@ -1280,11 +1472,11 @@ async function saveProject(){
       const folder=document.getElementById('pFolderSelect').value;
       if(!folder){alert('請選擇要匯入的 NAS 資料夾');return;}
       const caseNum=document.getElementById('pImportCase').value.trim();
-      body={name,nas_folder:folder,trello_board_id:board_id,notes,import_existing:true,...structured};
+      body={name,nas_folder:folder,trello_board_id:board_id,notes,import_existing:true,...structured,...gps};
       if(caseNum) body.case_number=caseNum;
     } else {
       const folder=document.getElementById('pFolder').value.trim();
-      body={name,case_number:folder,trello_board_id:board_id,notes,...structured};
+      body={name,case_number:folder,trello_board_id:board_id,notes,...structured,...gps};
     }
     res=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   } else {
@@ -1297,7 +1489,7 @@ async function saveProject(){
     let nas_path=null;
     if(v==='__keep__') nas_path=sel.dataset.keepFull||null;
     else if(v) nas_path=(nasBase?nasBase+'/':'')+v;
-    const body={name,trello_board_id:board_id,status,notes,nas_path,...structured};
+    const body={name,trello_board_id:board_id,status,notes,nas_path,...structured,...gps};
     res=await fetch('/api/projects/'+encodeURIComponent(editingPid),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   }
   const d=await res.json();
