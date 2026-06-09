@@ -39,6 +39,9 @@ except ImportError:
 # per-run 收集器：未對應的 Trello alias -> 出處集合（"board/card"）。run_checks() 起始清空。
 _unresolved_aliases: dict[str, set[str]] = {}
 
+# per-run 收集器：所有檢查項皆完成、但卡片不在「已完成」欄的 "board/card"。morning render。
+_complete_unfiled: list[str] = []
+
 
 def _resolve_tag_recipients(names: list[str], source: str | None = None) -> list[str]:
     """Resolve Trello tag names to LINE IDs via alias_name DB lookup.
@@ -190,7 +193,7 @@ def get_cards(board_id):
         "key": TRELLO_KEY,
         "token": TRELLO_TOKEN,
         "checklists": "all",
-        "fields": "name,desc,dateLastActivity,idList",
+        "fields": "name,desc,dateLastActivity,idList,dueComplete",
     }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
@@ -206,7 +209,7 @@ def get_board_full(board_id: str) -> dict:
         "lists": "open",
         "list_fields": "name",
         "cards": "open",
-        "card_fields": "name,desc,dateLastActivity,idList",
+        "card_fields": "name,desc,dateLastActivity,idList,dueComplete",
         "checklists": "all",
         "checklist_fields": "name,idCard",
         "fields": "name",
@@ -270,12 +273,15 @@ def fmt_item(list_name, card_name, body):
     return f"【{list_name}/{card_name}】\n{body}"
 
 
-def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode):
+def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode, is_complete: bool = False):
     sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}") or [contacts[n] for n in names if n in contacts]
     sa_larry = _resolve_tag_recipients(["sa", "larry"]) or [uid for n, uid in contacts.items() if n in ("sa", "larry")]
     now_time = datetime.now(TAIPEI).time()
     is_weekday = date.today().weekday() < 5
     sub = f"{list_name}/{card_name}"
+    # #3~#6 共用前提：載體未完成（card dueComplete / checklist state）才發送
+    # → 打勾完成的工項不再收到到期/逾期通知（#1/#2 開始日不受此限；清單名稱不當抑制）
+    active = not is_complete
 
     # 一筆通知 = ("item", 顏色, 抬頭(到期狀態，放最前面強調), 子標題, 原始文字含完整 tag)
     def add(uids, headline, color):
@@ -286,7 +292,7 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
     if mode == "morning":
         if start and days_diff(start) == 0:
             add(sponsors, "今日開始", "#388E3C")
-        if end and days_diff(end) == 0:
+        if active and end and days_diff(end) == 0:
             if not (end_time and now_time > end_time):
                 time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
                 add(set(sponsors + sa_larry), f"今日{time_str}到期", "#D32F2F")
@@ -294,14 +300,14 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
     elif mode == "noon":
         if start and 1 <= days_diff(start) <= 7:
             add(sponsors, f"{days_diff(start)} 天後開始", "#1976D2")
-        if end and 1 <= days_diff(end) <= 7:
+        if active and end and 1 <= days_diff(end) <= 7:
             d = days_diff(end)
             add(set(sponsors + sa_larry), f"{d} 天內到期", _due_color(d))
 
     elif mode == "evening":
-        if end and days_diff(end) == 0 and end_time and now_time > end_time:
+        if active and end and days_diff(end) == 0 and end_time and now_time > end_time:
             add(set(sponsors + sa_larry), f"今日 {end_time.strftime('%H:%M')} 已逾期", "#B71C1C")
-        if end and days_diff(end) < 0 and is_weekday:
+        if active and end and days_diff(end) < 0 and is_weekday:
             add(set(sponsors + sa_larry), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
 
 
@@ -321,6 +327,7 @@ def _inactive_board_ids() -> set:
 
 def run_checks(mode):
     _unresolved_aliases.clear()
+    _complete_unfiled.clear()
     contacts = load_contacts()
     boards = get_boards()
     skip_ids = _inactive_board_ids()
@@ -336,15 +343,20 @@ def run_checks(mode):
         cards = get_cards(board["id"])
         for card in cards:
             list_name = list_map.get(card.get("idList", ""), "")
+            card_has_check = False      # 此卡是否有帶標記的檢查項
+            card_all_complete = True    # 其所有檢查項是否皆完成（打勾）
 
             if card.get("desc"):
                 first_line = card["desc"].split("\n")[0]
                 parsed = parse_tag(first_line)
                 if parsed:
+                    card_has_check = True
+                    if not bool(card.get("dueComplete")):
+                        card_all_complete = False
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode)
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, is_complete=bool(card.get("dueComplete")))
                     if mode == "morning":
                         summary_items.append((board_name, f"・{list_name}/{card['name']}（{label}）"))
 
@@ -356,8 +368,11 @@ def run_checks(mode):
                     if not parsed:
                         continue
                     has_tag = True
+                    card_has_check = True
+                    if item.get("state") != "complete":
+                        card_all_complete = False
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode)
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, is_complete=(item.get("state") == "complete"))
                     if mode == "morning":
                         summary_items.append((board_name, f"・{list_name}/{card['name']}（{label}）"))
 
@@ -386,6 +401,10 @@ def run_checks(mode):
                                 for uid in sponsors:
                                     notifications.append((uid, board_name, rec))
                                 break
+
+            # 完成但未歸欄：整張卡所有檢查項皆完成、卻不在「已完成」欄 → minor 警告（morning render）
+            if card_has_check and card_all_complete and "已完成" not in list_name:
+                _complete_unfiled.append(f"{board_name}/{card['name']}")
 
     # #9 每日摘要（morning only）
     if mode == "morning":
@@ -419,6 +438,9 @@ def run_checks(mode):
                 else:
                     lines.append(f"・{name}")
             summary += "\n\n⚠️ 查無對應 LINE 帳號（未發送通知）\n" + "\n".join(lines)
+        # ✅ 完成但未歸欄：提醒把卡片移到「已完成」欄（minor）
+        if _complete_unfiled:
+            summary += "\n\n✅ 已完成但未歸『已完成』欄（請移動卡片）\n" + "\n".join(f"・{s}" for s in _complete_unfiled)
         for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
             if uid:
                 notifications.append((uid, "__summary__", ("summary", summary)))
