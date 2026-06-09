@@ -36,8 +36,16 @@ except ImportError:
 
 
 
-def _resolve_tag_recipients(names: list[str]) -> list[str]:
-    """Resolve Trello tag names to LINE IDs via alias_name DB lookup."""
+# per-run 收集器：未對應的 Trello alias -> 出處集合（"board/card"）。run_checks() 起始清空。
+_unresolved_aliases: dict[str, set[str]] = {}
+
+
+def _resolve_tag_recipients(names: list[str], source: str | None = None) -> list[str]:
+    """Resolve Trello tag names to LINE IDs via alias_name DB lookup.
+
+    未對應的名字除了印 log，也累積到 _unresolved_aliases（含可選出處 source），
+    供 morning 每日摘要呈現給 SA/Larry。
+    """
     if not names or _db_exec is None:
         return []
     def _query(conn):
@@ -54,6 +62,9 @@ def _resolve_tag_recipients(names: list[str]) -> list[str]:
             result.append(mapping[n])
         else:
             print(f"[notifier] WARNING: alias not found: {n}")
+            srcs = _unresolved_aliases.setdefault(n, set())
+            if source:
+                srcs.add(source)
     return result
 
 
@@ -260,7 +271,7 @@ def fmt_item(list_name, card_name, body):
 
 
 def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode):
-    sponsors = _resolve_tag_recipients(names) or [contacts[n] for n in names if n in contacts]
+    sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}") or [contacts[n] for n in names if n in contacts]
     sa_larry = _resolve_tag_recipients(["sa", "larry"]) or [uid for n, uid in contacts.items() if n in ("sa", "larry")]
     now_time = datetime.now(TAIPEI).time()
     is_weekday = date.today().weekday() < 5
@@ -309,6 +320,7 @@ def _inactive_board_ids() -> set:
 
 
 def run_checks(mode):
+    _unresolved_aliases.clear()
     contacts = load_contacts()
     boards = get_boards()
     skip_ids = _inactive_board_ids()
@@ -394,6 +406,19 @@ def run_checks(mode):
             summary = f"📋 {now_str} 每日工程摘要\n\n" + "\n\n".join(sections)
         else:
             summary = f"📋 {now_str} 今日無進行中工項"
+        # ⚠️ 未對應 alias：把 silent log warning 提升為早報可見內容（僅 morning）
+        if _unresolved_aliases:
+            lines = []
+            for name in sorted(_unresolved_aliases):
+                srcs = sorted(_unresolved_aliases[name])
+                if srcs:
+                    shown = "、".join(srcs[:3])
+                    if len(srcs) > 3:
+                        shown += f"…等 {len(srcs)} 處"
+                    lines.append(f"・{name}（{shown}）")
+                else:
+                    lines.append(f"・{name}")
+            summary += "\n\n⚠️ 查無對應 LINE 帳號（未發送通知）\n" + "\n".join(lines)
         for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
             if uid:
                 notifications.append((uid, "__summary__", ("summary", summary)))
