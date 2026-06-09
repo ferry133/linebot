@@ -135,6 +135,28 @@ def send_line(user_id, message):
     return resp.status_code, resp.text
 
 
+def send_flex(user_id, contents, alt_text):
+    headers = {
+        "Authorization": f"Bearer {LINE_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "to": user_id,
+        "messages": [{"type": "flex", "altText": alt_text[:400], "contents": contents}],
+    }
+    resp = requests.post(LINE_API, headers=headers, json=body)
+    return resp.status_code, resp.text
+
+
+# 到期急迫度 → 文字顏色（越急越紅）
+def _due_color(days):
+    if days <= 1:
+        return "#D32F2F"   # 紅：今天/明天
+    if days <= 3:
+        return "#EF6C00"   # 橙
+    return "#C79100"       # 琥珀：4–7 天
+
+
 def get_boards():
     url = f"https://api.trello.com/1/organizations/{WORKSPACE_ID}/boards"
     params = {"key": TRELLO_KEY, "token": TRELLO_TOKEN, "filter": "open"}
@@ -237,36 +259,39 @@ def fmt_item(list_name, card_name, body):
     return f"【{list_name}/{card_name}】\n{body}"
 
 
-def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, notifications, mode):
+def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode):
     sponsors = _resolve_tag_recipients(names) or [contacts[n] for n in names if n in contacts]
     sa_larry = _resolve_tag_recipients(["sa", "larry"]) or [uid for n, uid in contacts.items() if n in ("sa", "larry")]
     now_time = datetime.now(TAIPEI).time()
     is_weekday = date.today().weekday() < 5
+    sub = f"{list_name}/{card_name}"
 
-    def add(uids, body):
-        item = fmt_item(list_name, card_name, body)
+    # 一筆通知 = ("item", 顏色, 抬頭(到期狀態，放最前面強調), 子標題, 原始文字含完整 tag)
+    def add(uids, headline, color):
+        rec = ("item", color, headline, sub, raw)
         for uid in uids:
-            notifications.append((uid, board_name, item))
+            notifications.append((uid, board_name, rec))
 
     if mode == "morning":
         if start and days_diff(start) == 0:
-            add(sponsors, f"「{label}」今日開始，請確認")
+            add(sponsors, "今日開始", "#388E3C")
         if end and days_diff(end) == 0:
             if not (end_time and now_time > end_time):
                 time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
-                add(set(sponsors + sa_larry), f"「{label}」今日{time_str}到期，請確認")
+                add(set(sponsors + sa_larry), f"今日{time_str}到期", "#D32F2F")
 
     elif mode == "noon":
         if start and 1 <= days_diff(start) <= 7:
-            add(sponsors, f"「{label}」{days_diff(start)} 天後開始，請準備")
+            add(sponsors, f"{days_diff(start)} 天後開始", "#1976D2")
         if end and 1 <= days_diff(end) <= 7:
-            add(set(sponsors + sa_larry), f"「{label}」{days_diff(end)} 天後到期")
+            d = days_diff(end)
+            add(set(sponsors + sa_larry), f"{d} 天內到期", _due_color(d))
 
     elif mode == "evening":
         if end and days_diff(end) == 0 and end_time and now_time > end_time:
-            add(set(sponsors + sa_larry), f"「{label}」今日 {end_time.strftime('%H:%M')} 已逾期，請確認")
+            add(set(sponsors + sa_larry), f"今日 {end_time.strftime('%H:%M')} 已逾期", "#B71C1C")
         if end and days_diff(end) < 0 and is_weekday:
-            add(set(sponsors + sa_larry), f"「{label}」已逾期 {abs(days_diff(end))} 天，請確認")
+            add(set(sponsors + sa_larry), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
 
 
 def _inactive_board_ids() -> set:
@@ -307,7 +332,7 @@ def run_checks(mode):
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], notifications, mode)
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode)
                     if mode == "morning":
                         summary_items.append((board_name, f"・{list_name}/{card['name']}（{label}）"))
 
@@ -320,7 +345,7 @@ def run_checks(mode):
                         continue
                     has_tag = True
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], notifications, mode)
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode)
                     if mode == "morning":
                         summary_items.append((board_name, f"・{list_name}/{card['name']}（{label}）"))
 
@@ -334,10 +359,10 @@ def run_checks(mode):
                         days_stale = (datetime.now(TAIPEI) - last_dt.astimezone(TAIPEI)).days
                         incomplete = [i for i in items if i["state"] == "incomplete"]
                         if incomplete and days_stale >= 3:
-                            item_text = fmt_item(list_name, card["name"], f"已停滯 {days_stale} 天，請追蹤")
+                            rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "")
                             for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
                                 if uid:
-                                    notifications.append((uid, board_name, item_text))
+                                    notifications.append((uid, board_name, rec))
 
                     if items and all(i["state"] == "complete" for i in items):
                         for item in items:
@@ -345,9 +370,9 @@ def run_checks(mode):
                             if parsed:
                                 names, _, _, _, _ = parsed
                                 sponsors = [contacts[n] for n in names if n in contacts]
-                                item_text = fmt_item(list_name, card["name"], "所有工項已全部完成 ✓")
+                                rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "")
                                 for uid in sponsors:
-                                    notifications.append((uid, board_name, item_text))
+                                    notifications.append((uid, board_name, rec))
                                 break
 
     # #9 每日摘要（morning only）
@@ -371,7 +396,7 @@ def run_checks(mode):
             summary = f"📋 {now_str} 今日無進行中工項"
         for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
             if uid:
-                notifications.append((uid, "__summary__", summary))
+                notifications.append((uid, "__summary__", ("summary", summary)))
 
     # 去除重複通知
     seen = set()
@@ -397,29 +422,59 @@ def run_checks(mode):
     return unique
 
 
-def build_message(items):
-    """將同一收件人的 (board_name, item_text) 清單組合成一則訊息"""
-    summary_parts = []
+def build_flex(items, mode_label):
+    """將同一收件人的 (board_name, rec) 清單組成 LINE Flex 訊息 contents。
+    rec = ("item", 顏色, 抬頭, 子標題, 原始文字) 或 ("summary", 文字)。
+    每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag。"""
     board_order = []
-    board_items = {}
+    by_board = {}
+    summaries = []
+    for board_name, rec in items:
+        if rec[0] == "summary":
+            summaries.append(rec[1])
+            continue
+        by_board.setdefault(board_name, [])
+        if board_name not in board_order:
+            board_order.append(board_name)
+        by_board[board_name].append(rec)
 
-    for board_name, item_text in items:
-        if board_name == "__summary__":
-            summary_parts.append(item_text)
-        else:
-            if board_name not in board_items:
-                board_order.append(board_name)
-                board_items[board_name] = []
-            board_items[board_name].append(item_text)
-
-    parts = []
+    bubbles = []
     for board in board_order:
-        header = f"{board}\n＝＝＝＝＝＝＝＝＝＝＝＝"
-        body = "\n\n".join(board_items[board])
-        parts.append(f"{header}\n\n{body}")
+        body = []
+        for i, rec in enumerate(by_board[board]):
+            _, color, headline, sub, raw = rec
+            block = [
+                {"type": "text", "text": headline, "weight": "bold", "color": color, "size": "md", "wrap": True},
+                {"type": "text", "text": sub, "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
+            ]
+            if raw:
+                block.append({"type": "text", "text": raw, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
+            box = {"type": "box", "layout": "vertical", "contents": block}
+            if i > 0:
+                body.append({"type": "separator", "margin": "lg"})
+                box["margin"] = "lg"
+            body.append(box)
+        bubbles.append({
+            "type": "bubble", "size": "mega",
+            "header": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": f"意念情境・{mode_label}專案提醒", "size": "xs", "color": "#AAAAAA"},
+                {"type": "text", "text": board, "weight": "bold", "size": "md", "wrap": True, "color": "#1A1A1A", "margin": "sm"},
+            ]},
+            "body": {"type": "box", "layout": "vertical", "contents": body},
+        })
 
-    parts.extend(summary_parts)
-    return "\n\n".join(parts)
+    for s in summaries:
+        bubbles.append({
+            "type": "bubble", "size": "mega",
+            "body": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": s, "size": "sm", "wrap": True, "color": "#333333"},
+            ]},
+        })
+
+    bubbles = bubbles[:12]   # LINE carousel 上限 12 張
+    if len(bubbles) == 1:
+        return bubbles[0]
+    return {"type": "carousel", "contents": bubbles}
 
 
 def test_send():
@@ -446,12 +501,13 @@ def main():
         mode_label = {"morning": "早上", "noon": "中午", "evening": "下午"}[mode]
         notifications = run_checks(mode)
         grouped = {}
-        for uid, board_name, item_text in notifications:
-            grouped.setdefault(uid, []).append((board_name, item_text))
+        for uid, board_name, rec in notifications:
+            grouped.setdefault(uid, []).append((board_name, rec))
         print(f"[{mode}] 共 {len(grouped)} 位收件人")
         for uid, items in grouped.items():
-            msg = f"意念情境您好，{mode_label}專案提醒：\n\n" + build_message(items)
-            status, resp = send_line(uid, msg)
+            contents = build_flex(items, mode_label)
+            alt = f"意念情境 {mode_label}專案提醒（{len(items)} 則）"
+            status, resp = send_flex(uid, contents, alt)
             print(f"→ {uid[:8]}... 狀態:{status}")
     else:
         print("用法：python3 trello_line_notifier.py [morning|noon|evening|test]")
