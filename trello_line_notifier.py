@@ -210,7 +210,7 @@ def get_boards_batch(board_ids: list[str], max_workers: int = 10) -> list[dict]:
 
 
 ITEM_RE = re.compile(
-    r"\[@((?:@?\([^)]+\))+),(\d{8})?-?(\d{8})?(?::(\d{4}))?\](.*)"
+    r"\[@((?:@?\([^)]+\))+),\s*(\d{8})?-?(\d{8})?(?::(\d{4}))?\](.*)"
 )
 NAME_RE = re.compile(r"\(([^)]+)\)")
 
@@ -381,6 +381,19 @@ def run_checks(mode):
             seen.add(item)
             unique.append(item)
 
+    # 凡通知 larry，也同步通知 larryoffice
+    larry_ids = _resolve_tag_recipients(["larry"])
+    larryoffice_ids = _resolve_tag_recipients(["larryoffice"])
+    larry_uid = larry_ids[0] if larry_ids else contacts.get("larry")
+    larryoffice_uid = larryoffice_ids[0] if larryoffice_ids else contacts.get("larryoffice")
+    if larry_uid and larryoffice_uid:
+        for uid, bn, it in list(unique):
+            if uid == larry_uid:
+                mirrored = (larryoffice_uid, bn, it)
+                if mirrored not in seen:
+                    seen.add(mirrored)
+                    unique.append(mirrored)
+
     return unique
 
 
@@ -411,15 +424,16 @@ def build_message(items):
 
 def test_send():
     contacts = load_contacts()
-    larry_id = contacts.get("larry")
-    if not larry_id:
-        print("找不到 Larry 的 LINE ID")
-        return
     now_str = datetime.now(TAIPEI).strftime("%Y/%m/%d %H:%M")
     msg = f"✅ LINE 通知系統測試成功！\n時間：{now_str}\n\n意念情境自動通知系統已就緒。"
-    status, resp = send_line(larry_id, msg)
-    print(f"狀態碼：{status}")
-    print(f"回應：{resp}")
+
+    for name in ("larry", "larryoffice"):
+        uid = ((_resolve_tag_recipients([name]) or [None])[0]) or contacts.get(name)
+        if not uid:
+            print(f"找不到 {name} 的 LINE ID，略過")
+            continue
+        status, resp = send_line(uid, msg)
+        print(f"→ {name} ({uid[:8]}...)  狀態:{status}")
 
 
 def main():

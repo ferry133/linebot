@@ -25,7 +25,7 @@ TRELLO_TOKEN = os.environ.get("TRELLO_TOKEN", "")
 WORKSPACE_ID = "jiahomedesign1"
 
 ITEM_RE = re.compile(
-    r"\[@((?:@?\([^)]+\))+),(\d{8})?-?(\d{8})?(?::(\d{4}))?\](.+)"
+    r"\[@((?:@?\([^)]+\))+),\s*(\d{8})?-?(\d{8})?(?::(\d{4}))?\](.+)"
 )
 NAME_RE = re.compile(r"\(([^)]+)\)")
 
