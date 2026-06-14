@@ -992,6 +992,31 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
 .members-section{padding:12px 0 0;border-top:1px solid #f0f0f0;margin-top:8px}
 .member-chip{display:inline-flex;align-items:center;gap:6px;background:#f0f0f0;border-radius:16px;padding:4px 10px;font-size:12px;margin:2px}
 .member-chip .remove{cursor:pointer;color:#e53935;font-weight:700}
+
+/* ── 手機版（<=680px）：寬表格轉成卡片式堆疊 ── */
+@media (max-width:680px){
+  header{padding:12px 16px}
+  header h1{font-size:16px}
+  nav{padding:0 6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  nav button{padding:11px 14px;font-size:13px;white-space:nowrap}
+  main{margin:14px auto;padding:0 10px}
+  .card{padding:14px}
+  .filter-row{gap:6px}
+  .filter-row select,.filter-row input{flex:1;min-width:0}
+  dialog{padding:18px;width:95vw}
+  /* table → cards：thead 隱藏，每列一張卡，欄名用 data-label 當標籤 */
+  table,tbody,tr,td{display:block;width:100%}
+  thead{display:none}
+  tr{border:1px solid #eee;border-radius:8px;margin-bottom:12px;padding:8px 12px;background:#fff}
+  td{padding:5px 0!important;border:none!important;display:flex;justify-content:space-between;gap:12px;align-items:center;max-width:none!important}
+  td::before{content:attr(data-label);color:#999;font-size:12px;font-weight:600;flex:0 0 84px;text-align:left}
+  td[data-label="操作"]{flex-wrap:wrap;justify-content:flex-start}
+  td[data-label="操作"]::before{flex-basis:100%;margin-bottom:6px}
+  td.empty{display:block;text-align:center}
+  td.empty::before{display:none}
+  .btn+.btn{margin-left:0}
+  td .btn{margin:2px 4px 2px 0}
+}
 </style>
 </head>
 <body>
@@ -1281,6 +1306,8 @@ function renderUsers(users){
     btn.className='btn btn-b'; btn.textContent='編輯';
     btn.onclick=()=>openEditUser(u);
     tdAct.appendChild(btn);
+    const UL=['頭貼','顯示名稱','簡稱','LINE ID','角色','建立時間','操作'];
+    [...tr.cells].forEach((c,i)=>c.dataset.label=UL[i]||'');
   });
 }
 
@@ -1385,6 +1412,8 @@ function renderProjects(projects){
     if(archived){
       const rb=document.createElement('button');rb.className='btn btn-g';rb.style.marginLeft='4px';rb.textContent='還原';rb.onclick=()=>restoreProject(p);tdAct.appendChild(rb);
     }
+    const PL=['名稱','Trello 看板','相片資料夾','GPS','NAS 資料夾','狀態','人員數','操作'];
+    [...tr.cells].forEach((c,i)=>c.dataset.label=PL[i]||'');
   });
 }
 
@@ -1703,6 +1732,8 @@ function renderContacts(){
     const tdAct=tr.insertCell();
     const eb=document.createElement('button');eb.className='btn btn-b';eb.textContent='編輯';eb.onclick=()=>openEdit(n);tdAct.appendChild(eb);
     const db2=document.createElement('button');db2.className='btn btn-r';db2.style.marginLeft='6px';db2.textContent='刪除';db2.onclick=()=>del(n);tdAct.appendChild(db2);
+    const CL=['姓名','LINE User ID','工地權限','操作'];
+    [...tr.cells].forEach((c,i)=>c.dataset.label=CL[i]||'');
   });
 }
 
