@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """
-Admin Web UI — 聯絡人 & 工地權限管理
+Admin Web UI — 用戶 / 專案 / 工地權限管理
 
 GET  /                      HTML 管理介面
-GET  /api/contacts          列出所有聯絡人
-POST /api/contacts          新增
-PUT  /api/contacts/<name>   更新
-DELETE /api/contacts/<name> 刪除
 GET  /api/boards            Trello 看板清單（from DB）
 GET  /api/users             LINE 用戶列表（支援 ?role= 篩選）
 PUT  /api/users/<line_id>   更新角色與專案
 """
 
-import json
 import os
 import shutil
 import functools
@@ -32,7 +27,6 @@ run_migrations()
 app = Flask(__name__)
 
 KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge")
-CONTACTS_FILE = os.path.join(KNOWLEDGE_DIR, "contacts.json")
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
@@ -59,80 +53,7 @@ def require_auth(f):
     return decorated
 
 
-# ── Contacts helpers ───────────────────────────────────────────────────────────
-
-def read_contacts() -> dict:
-    try:
-        with open(CONTACTS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except OSError:
-        return {}
-
-
-def write_contacts(data: dict):
-    with open(CONTACTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 # ── API routes ────────────────────────────────────────────────────────────────
-
-@app.get("/api/contacts")
-@require_auth
-def list_contacts():
-    return jsonify(read_contacts())
-
-
-@app.post("/api/contacts")
-@require_auth
-def add_contact():
-    body = request.get_json()
-    name = (body.get("name") or "").strip()
-    line_id = (body.get("line_id") or "").strip()
-    projects = body.get("projects", "*")
-    if not name or not line_id:
-        return jsonify({"error": "name and line_id are required"}), 400
-    contacts = read_contacts()
-    if name in contacts:
-        return jsonify({"error": f"{name} already exists"}), 409
-    contacts[name] = {"line_id": line_id, "projects": projects}
-    write_contacts(contacts)
-    log.info(f"[admin] Added contact: {name}")
-    return jsonify({"ok": True})
-
-
-@app.put("/api/contacts/<name>")
-@require_auth
-def update_contact(name: str):
-    body = request.get_json()
-    contacts = read_contacts()
-    if name not in contacts:
-        return jsonify({"error": "not found"}), 404
-    entry = contacts[name]
-    if "line_id" in body:
-        entry["line_id"] = body["line_id"].strip()
-    if "projects" in body:
-        entry["projects"] = body["projects"]
-    new_name = (body.get("name") or name).strip()
-    if new_name != name:
-        contacts[new_name] = contacts.pop(name)
-    else:
-        contacts[name] = entry
-    write_contacts(contacts)
-    log.info(f"[admin] Updated contact: {name}")
-    return jsonify({"ok": True})
-
-
-@app.delete("/api/contacts/<name>")
-@require_auth
-def delete_contact(name: str):
-    contacts = read_contacts()
-    if name not in contacts:
-        return jsonify({"error": "not found"}), 404
-    del contacts[name]
-    write_contacts(contacts)
-    log.info(f"[admin] Deleted contact: {name}")
-    return jsonify({"ok": True})
-
 
 @app.get("/api/boards")
 @require_auth
@@ -1027,7 +948,6 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
 <nav>
   <button class="active" onclick="switchTab('users')">用戶管理</button>
   <button onclick="switchTab('projects')">專案管理</button>
-  <button onclick="switchTab('contacts')">聯絡人（舊）</button>
 </nav>
 <main>
 
@@ -1069,17 +989,6 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
     <table>
       <thead><tr><th>名稱</th><th>Trello 看板</th><th>相片資料夾</th><th>GPS</th><th>NAS 資料夾</th><th>狀態</th><th>人員數</th><th>操作</th></tr></thead>
       <tbody id="ptb"><tr><td colspan="8" class="empty">載入中…</td></tr></tbody>
-    </table>
-  </div>
-</div>
-
-<div id="tabContacts" class="tab">
-  <div class="card">
-    <h2>聯絡人 / 工地權限（contacts.json）</h2>
-    <button class="btn btn-g" id="addBtn" onclick="openAdd()">＋ 新增聯絡人</button>
-    <table>
-      <thead><tr><th>姓名</th><th>LINE User ID</th><th>工地權限</th><th>操作</th></tr></thead>
-      <tbody id="tb"><tr><td colspan="4" class="empty">載入中…</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -1214,25 +1123,6 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
   </div>
 </dialog>
 
-<!-- Contact add/edit dialog -->
-<dialog id="dlg">
-  <h3 id="dlgT">新增聯絡人</h3>
-  <div class="field"><label class="lbl">姓名</label><input type="text" id="fN" placeholder="王小明"></div>
-  <div class="field"><label class="lbl">LINE User ID（以 U 開頭）</label><input type="text" id="fL" placeholder="Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"></div>
-  <div class="radio-row">
-    <label><input type="radio" name="pt" value="all" checked onchange="toggleB(false)"> 員工（全部工地）</label>
-    <label><input type="radio" name="pt" value="sel" onchange="toggleB(true)"> 客戶（指定工地）</label>
-  </div>
-  <div class="field" id="bField" style="display:none">
-    <label class="lbl">可存取的工地（點選切換）</label>
-    <div class="boards-wrap" id="bGrid"></div>
-  </div>
-  <div class="df">
-    <button class="btn" onclick="document.getElementById('dlg').close()">取消</button>
-    <button class="btn btn-g" onclick="save()">儲存</button>
-  </div>
-</dialog>
-
 <script>
 function esc(s){
   const d=document.createElement('div');
@@ -1244,17 +1134,16 @@ const ROLE_LABEL={admin:'管理員',employee:'員工',vendor:'合作廠商',cust
 const ROLE_CLS={admin:'br',employee:'ba',vendor:'bo',customer:'bp',visitor:'bv'};
 const STATUS_LABEL={active:'進行中',completed:'已完成',archived:'已封存'};
 const STATUS_CLS={active:'ba',completed:'bp',archived:'bv'};
-let boards=[], contacts={}, editing=null, editingUid=null;
+let boards=[], editingUid=null;
 let allProjects=[], editingPid=null, importMode=false, projectMembers=[], editingMmPid=null;
 let nasFolders=[], nasBase='', editingOrigStatus='active';
 let allUsers=[];
 
 function switchTab(t){
-  document.querySelectorAll('nav button').forEach((b,i)=>b.classList.toggle('active',['users','projects','contacts'][i]===t));
+  document.querySelectorAll('nav button').forEach((b,i)=>b.classList.toggle('active',['users','projects'][i]===t));
   document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
   const id='tab'+t.charAt(0).toUpperCase()+t.slice(1);
   document.getElementById(id).classList.add('active');
-  if(t==='contacts'&&!Object.keys(contacts).length) loadContacts();
   if(t==='projects') loadProjects();
 }
 
@@ -1704,95 +1593,6 @@ async function saveMembers(){
   if(!res.ok){alert(d.error);return;}
   document.getElementById('mmdlg').close();
   loadProjects();
-}
-
-/* ── Contacts ── */
-
-async function loadContacts(){
-  [boards,contacts]=await Promise.all([
-    fetch('/api/boards').then(r=>r.json()),
-    fetch('/api/contacts').then(r=>r.json())
-  ]);
-  renderContacts();
-}
-
-function renderContacts(){
-  const tb=document.getElementById('tb');
-  const names=Object.keys(contacts);
-  if(!names.length){tb.textContent='';const tr=tb.insertRow();const td=tr.insertCell();td.colSpan=4;td.className='empty';td.textContent='尚無聯絡人';return;}
-  tb.textContent='';
-  names.forEach(n=>{
-    const c=contacts[n];
-    const tr=tb.insertRow();
-    tr.insertCell().textContent=n;
-    const tdId=tr.insertCell(); tdId.style.cssText='font-family:monospace;font-size:12px;color:#aaa'; tdId.textContent=c.line_id;
-    const tdP=tr.insertCell();
-    if(c.projects==='*'){const s=document.createElement('span');s.className='badge ba';s.textContent='員工（全部）';tdP.appendChild(s);}
-    else{(c.projects||[]).forEach(p=>{const s=document.createElement('span');s.className='badge bp';s.textContent=p;tdP.appendChild(s);});if(!(c.projects||[]).length)tdP.textContent='—';}
-    const tdAct=tr.insertCell();
-    const eb=document.createElement('button');eb.className='btn btn-b';eb.textContent='編輯';eb.onclick=()=>openEdit(n);tdAct.appendChild(eb);
-    const db2=document.createElement('button');db2.className='btn btn-r';db2.style.marginLeft='6px';db2.textContent='刪除';db2.onclick=()=>del(n);tdAct.appendChild(db2);
-    const CL=['姓名','LINE User ID','工地權限','操作'];
-    [...tr.cells].forEach((c,i)=>c.dataset.label=CL[i]||'');
-  });
-}
-
-function toggleB(show){document.getElementById('bField').style.display=show?'':'none';}
-
-function renderGrid(sel){
-  const wrap=document.getElementById('bGrid');
-  wrap.textContent='';
-  boards.forEach(b=>{
-    const name=b.board_name||b;
-    const chip=document.createElement('span');
-    chip.className='chip'+(sel.includes(name)?' on':'');
-    chip.textContent=name;
-    chip.onclick=()=>chip.classList.toggle('on');
-    wrap.appendChild(chip);
-  });
-}
-
-function openAdd(){
-  editing=null;
-  document.getElementById('dlgT').textContent='新增聯絡人';
-  document.getElementById('fN').value='';
-  document.getElementById('fL').value='';
-  document.querySelector('input[name=pt][value=all]').checked=true;
-  toggleB(false); renderGrid([]);
-  document.getElementById('dlg').showModal();
-}
-
-function openEdit(n){
-  editing=n;
-  const c=contacts[n];
-  document.getElementById('dlgT').textContent='編輯聯絡人';
-  document.getElementById('fN').value=n;
-  document.getElementById('fL').value=c.line_id;
-  const isAll=c.projects==='*';
-  document.querySelector('input[name=pt][value='+(isAll?'all':'sel')+']').checked=true;
-  toggleB(!isAll); renderGrid(isAll?[]:(c.projects||[]));
-  document.getElementById('dlg').showModal();
-}
-
-async function save(){
-  const name=document.getElementById('fN').value.trim();
-  const lid=document.getElementById('fL').value.trim();
-  if(!name||!lid){alert('請填寫姓名和 LINE ID');return;}
-  const isAll=document.querySelector('input[name=pt]:checked').value==='all';
-  const projects=isAll?'*':[...document.querySelectorAll('#bGrid .chip.on')].map(e=>e.textContent.trim());
-  const body={name,line_id:lid,projects};
-  const url=editing?'/api/contacts/'+encodeURIComponent(editing):'/api/contacts';
-  const res=await fetch(url,{method:editing?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const d=await res.json();
-  if(!res.ok){alert(d.error);return;}
-  document.getElementById('dlg').close();
-  loadContacts();
-}
-
-async function del(n){
-  if(!confirm('確定刪除「'+n+'」？'))return;
-  await fetch('/api/contacts/'+encodeURIComponent(n),{method:'DELETE'});
-  loadContacts();
 }
 
 loadUsers();
