@@ -90,6 +90,25 @@ def _resolve_recipients_by_board_id(board_id: str) -> list[str]:
     return result
 
 
+def _internal_recipients() -> list[str]:
+    """所有管理者/員工的 LINE IDs — 內部提醒（#3–#7、#9）的收件人。
+
+    取代舊有固定的 sa/larry 兩個 alias。DB 不可用或查無時回 []（內部份該次不送，僅 log）。
+    """
+    if _db_exec is None:
+        return []
+    def _query(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT line_id FROM line_users WHERE role IN ('admin', 'employee')"
+            )
+            return [row[0] for row in cur.fetchall()]
+    result = _db_exec(_query) or []
+    if not result:
+        print("[notifier] WARNING: no internal recipients (admin/employee) found")
+    return result
+
+
 def _load_contacts_from_db() -> dict | None:
     if _db_exec is None:
         return None
@@ -273,9 +292,8 @@ def fmt_item(list_name, card_name, body):
     return f"【{list_name}/{card_name}】\n{body}"
 
 
-def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode, is_complete: bool = False):
+def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode, internal, is_complete: bool = False):
     sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}") or [contacts[n] for n in names if n in contacts]
-    sa_larry = _resolve_tag_recipients(["sa", "larry"]) or [uid for n, uid in contacts.items() if n in ("sa", "larry")]
     now_time = datetime.now(TAIPEI).time()
     is_weekday = date.today().weekday() < 5
     sub = f"{list_name}/{card_name}"
@@ -295,20 +313,20 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
         if active and end and days_diff(end) == 0:
             if not (end_time and now_time > end_time):
                 time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
-                add(set(sponsors + sa_larry), f"今日{time_str}到期", "#D32F2F")
+                add(set(sponsors + internal), f"今日{time_str}到期", "#D32F2F")
 
     elif mode == "noon":
         if start and 1 <= days_diff(start) <= 7:
             add(sponsors, f"{days_diff(start)} 天後開始", "#1976D2")
         if active and end and 1 <= days_diff(end) <= 7:
             d = days_diff(end)
-            add(set(sponsors + sa_larry), f"{d} 天內到期", _due_color(d))
+            add(set(sponsors + internal), f"{d} 天內到期", _due_color(d))
 
     elif mode == "evening":
         if active and end and days_diff(end) == 0 and end_time and now_time > end_time:
-            add(set(sponsors + sa_larry), f"今日 {end_time.strftime('%H:%M')} 已逾期", "#B71C1C")
+            add(set(sponsors + internal), f"今日 {end_time.strftime('%H:%M')} 已逾期", "#B71C1C")
         if active and end and days_diff(end) < 0 and is_weekday:
-            add(set(sponsors + sa_larry), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
+            add(set(sponsors + internal), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
 
 
 def _inactive_board_ids() -> set:
@@ -329,6 +347,7 @@ def run_checks(mode):
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
     contacts = load_contacts()
+    internal = _internal_recipients()  # 所有管理者/員工 — #3–#7、#9 內部收件人
     boards = get_boards()
     skip_ids = _inactive_board_ids()
     notifications = []
@@ -356,7 +375,7 @@ def run_checks(mode):
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, is_complete=bool(card.get("dueComplete")))
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=bool(card.get("dueComplete")))
                     if mode == "morning":
                         summary_items.append((board_name, list_name, card["name"], label))
 
@@ -372,7 +391,7 @@ def run_checks(mode):
                     if item.get("state") != "complete":
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, is_complete=(item.get("state") == "complete"))
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=(item.get("state") == "complete"))
                     if mode == "morning":
                         summary_items.append((board_name, list_name, card["name"], label))
 
@@ -387,7 +406,7 @@ def run_checks(mode):
                         incomplete = [i for i in items if i["state"] == "incomplete"]
                         if incomplete and days_stale >= 3:
                             rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "")
-                            for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
+                            for uid in internal:
                                 if uid:
                                     notifications.append((uid, board_name, rec))
 
@@ -451,7 +470,7 @@ def run_checks(mode):
         if _complete_unfiled:
             warnings.append(("✅ 已完成但未歸『已完成』欄（請移動卡片）", tuple(f"・{s}" for s in _complete_unfiled)))
         summary_rec = ("summary", now_str, sections, tuple(warnings))
-        for uid in (_resolve_tag_recipients(["sa", "larry"]) or [contacts.get("sa"), contacts.get("larry")]):
+        for uid in internal:
             if uid:
                 notifications.append((uid, "__summary__", summary_rec))
 
