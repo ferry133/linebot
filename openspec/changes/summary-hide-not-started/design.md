@@ -8,9 +8,9 @@
 
 ## Goals / Non-Goals
 
-- 摘要納入「**未完成**且（窗口內 或 逾期）」的工項：窗口內＝`start`、`end` 皆有且 `start <= 今天 <= end`；逾期＝有 `end` 且 `今天 > end`（`start` 可選）。
-- 排除：已完成（不論窗口內或逾期）、未來才開始、只有 `end` 但未到期、只有 `start` 無 `end`、無日期者。
-- 改動侷限在 `summary_items` 收集處；其餘行為不變。
+- 摘要納入「**未完成**且（今天 > start 或 今天 > end）」的工項；今天 > end 者標示「逾期」（紅字）。
+- 排除：已完成、未來才開始（今天 ≤ start）、只有 `end` 但未到期、無日期者。
+- 改動在 `summary_items` 收集處（加 overdue 旗標）與摘要 render（呈現逾期記號）；#1~#8 不變。
 
 **Non-Goals:**
 - 不動 #1~#8 任何通知判斷（如 #2「今日開始」仍在 start 當天發、#5/#6 逾期仍照常發）。
@@ -19,26 +19,31 @@
 
 ## Decisions
 
-**D1：以「未完成 且（窗口內 或 逾期）」決定是否納入摘要。**
+**D1：以「未完成 且（今天 > start 或 今天 > end）」決定納入；今天 > end 標逾期。**
 ```python
+def _is_overdue(end) -> bool:
+    return bool(end) and days_diff(end) < 0
+
 def _in_summary(start, end, is_complete) -> bool:
     if is_complete:
         return False
-    in_window = bool(start) and bool(end) and days_diff(start) <= 0 <= days_diff(end)
-    overdue = bool(end) and days_diff(end) < 0
-    return in_window or overdue
+    started = bool(start) and days_diff(start) < 0   # 今天 > start
+    return started or _is_overdue(end)               # 或 今天 > end
 ...
 if mode == "morning" and _in_summary(start, end, is_complete):
-    summary_items.append((board_name, list_name, card["name"], label))
+    summary_items.append((board_name, list_name, card["name"], label, _is_overdue(end)))
 ```
-- 共同前提 `not is_complete`：已打勾完成者一律不入摘要（不論窗口內或逾期）。
-- `in_window`：要有完整 `start`/`end`，今天落在 `[start, end]`（含端點）。排除未來才開始、只有 end 未到期、只有 start 無 end。
-- `overdue`：只要有 `end` 且今天已過 `end` 即可（`start` 不要求），故「只有 end 的逾期未完成」也涵蓋。
-- `is_complete` 在兩處 append 點皆可取得：card `dueComplete` / checklist `state`。
-- 對照使用者的決策表（最先符合者優先）：overdue 子句先攔「只有 end 的逾期未完成」，故「缺 start/end → ❌」只作用於未被前面攔到的剩餘情況（只有 start、只有 end 未到期、無日期），二者一致。
+- 共同前提 `not is_complete`：已打勾完成者一律不入摘要。
+- `started`：有 `start` 且今天 > start（無上界，逾期未完成持續顯示直到完成）。只有 `start` 也涵蓋。
+- 逾期：有 `end` 且今天 > end。只有 `end` 者僅在逾期時才滿足 → 「只有 end 逾期才顯示」。
+- 不再用 ±7 補區間：A/B 兩條 start/end 規則已能涵蓋；只有 end 未逾期即不顯示。
+- `is_complete`／overdue 旗標在兩處 append 點皆可由 card `dueComplete` / checklist `state` 與 `end` 取得。
 
-**D2：抽 module-level helper `_in_summary(start, end, is_complete)`。**
-條件含 3 行布林、且在卡片描述／checklist 兩處重複，抽成與 `days_diff`/`_due_color` 同層的小 helper 較 DRY、好測，並與既有 module-level helper 風格一致。
+**D2：抽 module-level helper `_in_summary` / `_is_overdue`。**
+與 `days_diff`/`_due_color` 同層的小 helper，DRY、好測。`summary_items` 加第 5 元素 `overdue` 旗標。
+
+**D3：逾期記號在 render 呈現。**
+`summary_items` 5-tuple 帶 `overdue`；摘要 tree 的 leaf 由 `label` 改為 `(label, overdue)`；render 時逾期工項以紅字 `⚠️ {label}（逾期）` 呈現（label==card 的 desc 卡則顯示 `⚠️ 逾期`）。
 
 ## Risks / Trade-offs
 

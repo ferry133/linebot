@@ -287,16 +287,21 @@ def days_diff(d):
     return (d - date.today()).days
 
 
-def _in_summary(start, end, is_complete) -> bool:
-    """#9 每日摘要納入條件：未完成，且（今天落在 [start, end] 窗口內 或 已逾期）。
+def _is_overdue(end) -> bool:
+    """有結束日且今天已過 end（今天 > end）。"""
+    return bool(end) and days_diff(end) < 0
 
-    窗口內需同時有 start/end；逾期只需有 end（含只有 end 者）。已完成一律排除。
+
+def _in_summary(start, end, is_complete) -> bool:
+    """#9 每日摘要納入條件：尚未完成，且（今天 > start 已開始 或 今天 > end 已逾期）。
+
+    只有 start：今天 > start 即顯示（無上界，直到完成）。
+    只有 end：僅今天 > end（逾期）才顯示。兩者皆無或已完成→排除。
     """
     if is_complete:
         return False
-    in_window = bool(start) and bool(end) and days_diff(start) <= 0 <= days_diff(end)
-    overdue = bool(end) and days_diff(end) < 0
-    return in_window or overdue
+    started = bool(start) and days_diff(start) < 0
+    return started or _is_overdue(end)
 
 
 def fmt_item(list_name, card_name, body):
@@ -390,7 +395,7 @@ def run_checks(mode):
                         label = card["name"]
                     check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=is_complete)
                     if mode == "morning" and _in_summary(start, end, is_complete):
-                        summary_items.append((board_name, list_name, card["name"], label))
+                        summary_items.append((board_name, list_name, card["name"], label, _is_overdue(end)))
 
             for checklist in card.get("checklists", []):
                 items = checklist.get("checkItems", [])
@@ -407,7 +412,7 @@ def run_checks(mode):
                     names, start, end, end_time, label = parsed
                     check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=is_complete)
                     if mode == "morning" and _in_summary(start, end, is_complete):
-                        summary_items.append((board_name, list_name, card["name"], label))
+                        summary_items.append((board_name, list_name, card["name"], label, _is_overdue(end)))
 
                 if not has_tag:
                     continue
@@ -445,11 +450,12 @@ def run_checks(mode):
         # 巢狀結構：board → 狀態欄(list_name) → 卡片 → [工項]；收斂同卡重複、同工項去重
         from collections import OrderedDict
         tree = OrderedDict()
-        for board, lst, card, label in summary_items:
+        for board, lst, card, label, overdue in summary_items:
             cards = tree.setdefault(board, OrderedDict()).setdefault(lst, OrderedDict())
             labels = cards.setdefault(card, [])
-            if label not in labels:
-                labels.append(label)
+            entry = (label, overdue)
+            if entry not in labels:
+                labels.append(entry)
 
         def _status_rank(lst):
             if "已完成" in lst: return 2
@@ -586,9 +592,17 @@ def build_flex(items, mode_label):
                 for card, labels in cards:
                     block = [{"type": "text", "text": card, "size": "sm", "weight": "bold",
                               "color": "#1A1A1A", "wrap": True, "margin": "md"}]
-                    # label 等於卡片名（tag 未填 label 的預設值）就不重列，避免冗餘
-                    block += [{"type": "text", "text": f"・{lb}", "size": "xs", "color": "#666666",
-                               "wrap": True, "margin": "xs"} for lb in labels if lb != card]
+                    for lb, overdue in labels:
+                        if lb == card and not overdue:
+                            continue  # label 等於卡片名（tag 未填 label 預設值）且未逾期 → 不重列
+                        if lb == card:
+                            txt, col = "⚠️ 逾期", "#D32F2F"
+                        elif overdue:
+                            txt, col = f"⚠️ {lb}（逾期）", "#D32F2F"
+                        else:
+                            txt, col = lb, "#666666"
+                        block.append({"type": "text", "text": f"・{txt}", "size": "xs",
+                                      "color": col, "wrap": True, "margin": "xs"})
                     body.append({"type": "box", "layout": "vertical", "contents": block})
             bubbles.append(_summary_bubble(now_str, board, body))
         # 警告各自一張 bubble，標題即內容主旨（alias / 未歸欄）
