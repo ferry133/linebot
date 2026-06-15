@@ -4,7 +4,7 @@ import json
 import re
 import requests
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -287,21 +287,38 @@ def days_diff(d):
     return (d - date.today()).days
 
 
-def _is_overdue(end) -> bool:
-    """有結束日且今天已過 end（今天 > end）。"""
-    return bool(end) and days_diff(end) < 0
+def _summary_window(start, end):
+    """以 ±7 補出缺的端點，回傳完整 (start, end)：
+
+    - 都有：原樣 (start, end)
+    - 只有 end（-YYYYMMDD）：(end-7, end)
+    - 只有 start（YYYYMMDD-）：(start, start+7)
+    - 都無：(None, None)
+    """
+    if start and end:
+        return start, end
+    if end:
+        return end - timedelta(days=7), end
+    if start:
+        return start, start + timedelta(days=7)
+    return None, None
 
 
 def _in_summary(start, end, is_complete) -> bool:
-    """#9 每日摘要納入條件：尚未完成，且（今天 > start 已開始 或 今天 > end 已逾期）。
+    """#9 每日摘要納入條件：尚未完成，且今天已到補完窗口的起點（今天 >= 補出的 start）。
 
-    只有 start：今天 > start 即顯示（無上界，直到完成）。
-    只有 end：僅今天 > end（逾期）才顯示。兩者皆無或已完成→排除。
+    無上界：逾期未完成的工項持續顯示，直到打勾完成。未來（今天 < start）與已完成→排除。
     """
     if is_complete:
         return False
-    started = bool(start) and days_diff(start) < 0
-    return started or _is_overdue(end)
+    ns, _ = _summary_window(start, end)
+    return ns is not None and days_diff(ns) <= 0
+
+
+def _summary_overdue(start, end) -> bool:
+    """今天已過補完窗口的終點（今天 > 補出的 end）→ 在摘要標「逾期」。"""
+    _, ne = _summary_window(start, end)
+    return ne is not None and days_diff(ne) < 0
 
 
 def fmt_item(list_name, card_name, body):
@@ -395,7 +412,7 @@ def run_checks(mode):
                         label = card["name"]
                     check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=is_complete)
                     if mode == "morning" and _in_summary(start, end, is_complete):
-                        summary_items.append((board_name, list_name, card["name"], label, _is_overdue(end)))
+                        summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 
             for checklist in card.get("checklists", []):
                 items = checklist.get("checkItems", [])
@@ -412,7 +429,7 @@ def run_checks(mode):
                     names, start, end, end_time, label = parsed
                     check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=is_complete)
                     if mode == "morning" and _in_summary(start, end, is_complete):
-                        summary_items.append((board_name, list_name, card["name"], label, _is_overdue(end)))
+                        summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 
                 if not has_tag:
                     continue

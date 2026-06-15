@@ -8,8 +8,8 @@
 
 ## Goals / Non-Goals
 
-- 摘要納入「**未完成**且（今天 > start 或 今天 > end）」的工項；今天 > end 者標示「逾期」（紅字）。
-- 排除：已完成、未來才開始（今天 ≤ start）、只有 `end` 但未到期、無日期者。
+- 以 ±7 補出缺的端點後，摘要納入「**未完成**且 今天 ≥ 補完 start」的工項（無上界）；今天 > 補完 end 者標「逾期」（紅字）。
+- 排除：已完成、未來才開始（今天 < 補完 start）、無日期者。
 - 改動在 `summary_items` 收集處（加 overdue 旗標）與摘要 render（呈現逾期記號）；#1~#8 不變。
 
 **Non-Goals:**
@@ -19,25 +19,32 @@
 
 ## Decisions
 
-**D1：以「未完成 且（今天 > start 或 今天 > end）」決定納入；今天 > end 標逾期。**
+**D1：±7 補完窗口後，以「未完成 且 今天 ≥ 補完 start」決定納入；今天 > 補完 end 標逾期。**
 ```python
-def _is_overdue(end) -> bool:
-    return bool(end) and days_diff(end) < 0
+def _summary_window(start, end):
+    if start and end: return start, end
+    if end:           return end - timedelta(days=7), end       # 只有 end → [end-7, end]
+    if start:         return start, start + timedelta(days=7)    # 只有 start → [start, start+7]
+    return None, None
 
 def _in_summary(start, end, is_complete) -> bool:
     if is_complete:
         return False
-    started = bool(start) and days_diff(start) < 0   # 今天 > start
-    return started or _is_overdue(end)               # 或 今天 > end
+    ns, _ = _summary_window(start, end)
+    return ns is not None and days_diff(ns) <= 0     # 今天 >= 補完 start，無上界
+
+def _summary_overdue(start, end) -> bool:
+    _, ne = _summary_window(start, end)
+    return ne is not None and days_diff(ne) < 0      # 今天 > 補完 end
 ...
 if mode == "morning" and _in_summary(start, end, is_complete):
-    summary_items.append((board_name, list_name, card["name"], label, _is_overdue(end)))
+    summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 ```
 - 共同前提 `not is_complete`：已打勾完成者一律不入摘要。
-- `started`：有 `start` 且今天 > start（無上界，逾期未完成持續顯示直到完成）。只有 `start` 也涵蓋。
-- 逾期：有 `end` 且今天 > end。只有 `end` 者僅在逾期時才滿足 → 「只有 end 逾期才顯示」。
-- 不再用 ±7 補區間：A/B 兩條 start/end 規則已能涵蓋；只有 end 未逾期即不顯示。
-- `is_complete`／overdue 旗標在兩處 append 點皆可由 card `dueComplete` / checklist `state` 與 `end` 取得。
+- ±7 補端點解決半開區間：`[@(sa),20260530-]`（只有 start）→ 補 end=start+7，今天若已過 start+7 即標逾期；`[@(bobo),-20260620]`（只有 end）→ 補 start=end-7，到期前一週即進摘要。
+- 納入用「今天 ≥ 補完 start」無上界：逾期未完成持續顯示直到打勾完成。
+- 逾期旗標用「今天 > 補完 end」：含只有 start／只有 end 的補完端點。
+- `is_complete`／overdue 旗標在兩處 append 點皆可由 card `dueComplete` / checklist `state` 與 start/end 取得。
 
 **D2：抽 module-level helper `_in_summary` / `_is_overdue`。**
 與 `days_diff`/`_due_color` 同層的小 helper，DRY、好測。`summary_items` 加第 5 元素 `overdue` 旗標。

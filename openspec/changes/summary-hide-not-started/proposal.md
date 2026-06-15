@@ -4,16 +4,16 @@
 
 ## What Changes
 
-- 每日摘要（morning #9）SHALL 僅納入**尚未完成**且符合下列任一者：**今天 > start**（已開始）或 **今天 > end**（逾期）。
-- 凡**今天 > end** 的工項在摘要中 SHALL 標示「逾期」記號（紅字）。
-- 排除：**已完成**、**未來才開始**（今天 ≤ start）、**只有 `end` 但尚未到期**（今天 ≤ end）、以及**完全沒設日期**者。
+- 每日摘要（morning #9）SHALL 先以 **±7 天**補完半開區間（只有 end→`[end-7,end]`、只有 start→`[start,start+7]`），再納入**尚未完成**且 **今天 ≥ 補完 start** 的工項（無上界）。
+- 凡 **今天 > 補完 end** 的工項在摘要中 SHALL 標示「逾期」記號（紅字）。
+- 排除：**已完成**、**未來才開始**（今天 < 補完 start）、以及**完全沒設日期**者。
 - 僅影響 morning 摘要的 `summary_items` 收集與呈現；#1~#8 的通知判斷（含 #5/#6 逾期通知）與既有的 completion gate、未對應 alias 警告、「已完成未歸欄」警告 MUST 維持不變。
 
 ## Capabilities
 
 ### New Capabilities
 
-- `notification-daily-summary`: 定義每日工程摘要（#9）納入哪些工項——**未完成**且（今天 > start 或 今天 > end）者納入，今天 > end 者標「逾期」；已完成、未來才開始、只有 end 未到期、無日期者排除。
+- `notification-daily-summary`: 定義每日工程摘要（#9）納入哪些工項——以 ±7 補完窗口後，**未完成**且 今天 ≥ 補完 start 者納入，今天 > 補完 end 者標「逾期」；已完成、未來才開始、無日期者排除。
 
 ### Modified Capabilities
 
