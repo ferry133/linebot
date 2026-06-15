@@ -287,6 +287,18 @@ def days_diff(d):
     return (d - date.today()).days
 
 
+def _in_summary(start, end, is_complete) -> bool:
+    """#9 每日摘要納入條件：未完成，且（今天落在 [start, end] 窗口內 或 已逾期）。
+
+    窗口內需同時有 start/end；逾期只需有 end（含只有 end 者）。已完成一律排除。
+    """
+    if is_complete:
+        return False
+    in_window = bool(start) and bool(end) and days_diff(start) <= 0 <= days_diff(end)
+    overdue = bool(end) and days_diff(end) < 0
+    return in_window or overdue
+
+
 def fmt_item(list_name, card_name, body):
     """格式化單項通知（不含 board name）"""
     return f"【{list_name}/{card_name}】\n{body}"
@@ -370,13 +382,14 @@ def run_checks(mode):
                 parsed = parse_tag(first_line)
                 if parsed:
                     card_has_check = True
-                    if not bool(card.get("dueComplete")):
+                    is_complete = bool(card.get("dueComplete"))
+                    if not is_complete:
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=bool(card.get("dueComplete")))
-                    if mode == "morning":
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=is_complete)
+                    if mode == "morning" and _in_summary(start, end, is_complete):
                         summary_items.append((board_name, list_name, card["name"], label))
 
             for checklist in card.get("checklists", []):
@@ -388,11 +401,12 @@ def run_checks(mode):
                         continue
                     has_tag = True
                     card_has_check = True
-                    if item.get("state") != "complete":
+                    is_complete = (item.get("state") == "complete")
+                    if not is_complete:
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=(item.get("state") == "complete"))
-                    if mode == "morning":
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=is_complete)
+                    if mode == "morning" and _in_summary(start, end, is_complete):
                         summary_items.append((board_name, list_name, card["name"], label))
 
                 if not has_tag:
