@@ -14,10 +14,10 @@
 ## 3. 驗證
 
 - [x] 3.1 `python3 -c "import ast; ast.parse(open('trello_line_notifier.py').read())"` 通過；本機以無 DB 環境跑 `run_checks` 不 crash（internal=[]）。
-- [ ] 3.2 部署後在 pod 內載入改好的 `trello_line_notifier.py`，呼叫 `_internal_recipients()` 確認回傳的 line_id 集合 = admin/employee 全體（read-only，不真正群發）。
-- [ ] 3.3 一次實跑驗證 render（收件範圍限 larry+larryoffice），確認內部通知收件集合與預期一致。
+- [x] 3.2 部署後在 pod 內載入改好的 `trello_line_notifier.py`，呼叫 `_internal_recipients()` 確認回傳的 line_id 集合 = admin/employee 全體（read-only，不真正群發）。
+- [x] 3.3 一次實跑驗證 render（收件範圍限 larry+larryoffice），確認內部通知收件集合與預期一致。
 
 ## 4. 上線
 
-- [ ] 4.1 commit + push linebot；CI build。
-- [ ] 4.2 bump jg-base 全部 image pin（cronjobs.yaml ×3、deploy.yaml ×4、admin.yaml ×1、migrate-contacts-job.yaml ×1）→ Flux reconcile。
+- [x] 4.1 commit + push linebot；CI build。
+- [x] 4.2 bump jg-base 全部 image pin（cronjobs.yaml ×3、deploy.yaml ×4、admin.yaml ×1、migrate-contacts-job.yaml ×1）→ Flux reconcile。
