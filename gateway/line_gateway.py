@@ -81,12 +81,33 @@ def push_line(user_id: str, text: str):
         print(f"[GW] Push API failed {user_id[:8]}: HTTP {resp.status_code} {resp.text}")
 
 
+def reply_line(reply_token: str, text: str) -> bool:
+    """Reply via the free Reply API. Returns False if the token is unusable."""
+    resp = requests.post(
+        "https://api.line.me/v2/bot/message/reply",
+        headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+        json={"replyToken": reply_token, "messages": [{"type": "text", "text": text}]},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        print(f"[GW] Reply API failed: HTTP {resp.status_code} {resp.text}")
+        return False
+    return True
+
+
 # ── MQTT outbox → LINE ────────────────────────────────────────────────────────
 
 def _on_outbox(payload: dict):
     user_id = payload.get("user_id", "")
     content = payload.get("content", "")
-    if user_id and content:
+    reply_token = payload.get("reply_token")
+    if not content:
+        return
+    # Prefer the free Reply API; fall back to Push when there is no usable
+    # reply token (absent, expired, or already used).
+    if reply_token and reply_line(reply_token, content):
+        return
+    if user_id:
         push_line(user_id, content)
 
 
@@ -130,6 +151,7 @@ def webhook():
             "text": text,
             "timestamp": event.get("timestamp"),
             "source": "line",
+            "reply_token": event.get("replyToken"),
         })
 
     return "OK"

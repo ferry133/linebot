@@ -227,22 +227,25 @@ class CustomerServiceAgent:
         text = payload.get("text", "")
         if not text:
             return
+        reply_token = payload.get("reply_token")
         log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
-        threading.Thread(target=self._process, args=(user_id, text), daemon=True).start()
+        threading.Thread(target=self._process, args=(user_id, text, reply_token), daemon=True).start()
 
-    def _process(self, user_id: str, text: str):
+    def _process(self, user_id: str, text: str, reply_token: str | None = None):
         try:
             reply = self._run(user_id, text)
             self.broker.publish(OUTBOX_TOPIC, {
                 "user_id": user_id,
                 "content": reply,
+                "reply_token": reply_token,
             })
         except Exception as e:
             log.exception(f"[{AGENT_ID}] Error processing message from {user_id[:8]}: {e}")
             self.broker.publish(OUTBOX_TOPIC, {
                 "user_id": user_id,
                 "content": "抱歉，系統暫時異常，請稍後再試。",
+                "reply_token": reply_token,
             })
 
     # ── 五步循環 ──────────────────────────────────────────────────────────────
