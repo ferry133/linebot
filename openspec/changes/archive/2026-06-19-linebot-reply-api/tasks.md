@@ -20,6 +20,6 @@
 
 ## 5. Deploy & validate in cluster
 
-- [ ] 5.1 Commit & push `linebot`; let CI build the sha-tagged image.
-- [ ] 5.2 Bump the image tag for **both** `line-gateway` and `customer-service-agent` deployments in `jg-base`; `flux reconcile`.
-- [ ] 5.3 Send a test LINE message; confirm `line-gateway` logs show a successful reply (no `429`) and the reply arrives in LINE.
+- [x] 5.1 Commit & push `linebot`; let CI build the sha-tagged image.
+- [x] 5.2 Bump the image tag for **both** `line-gateway` and `customer-service-agent` deployments in `jg-base`; `flux reconcile`.
+- [x] 5.3 Send a test LINE message; confirm `line-gateway` logs show a successful reply (no `429`) and the reply arrives in LINE.
