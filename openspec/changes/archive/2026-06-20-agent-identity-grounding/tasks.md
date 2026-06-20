@@ -14,8 +14,8 @@
 
 ## 4. 部署
 
-- [ ] 4.1 commit + push linebot；CI green。
-- [ ] 4.2 bump jg-base 8 個 image pins（deploy ×4 / admin ×1 / cronjobs ×3，**不含** migrate-contacts-job）→ Flux reconcile（kustomization `linebot` + `trello-notifier`）。
+- [x] 4.1 commit + push linebot；CI green。
+- [x] 4.2 bump jg-base 8 個 image pins（deploy ×4 / admin ×1 / cronjobs ×3，**不含** migrate-contacts-job）→ Flux reconcile（kustomization `linebot` + `trello-notifier`）。
 
 ## 5. 部署後驗證
 
