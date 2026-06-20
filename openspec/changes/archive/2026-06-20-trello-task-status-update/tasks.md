@@ -36,7 +36,7 @@
 ## 8. 部署後 pod 驗證
 
 - [x] 8.1 migration 011 已套用（task_confirmations 13 欄）；非破壞性驗證：`_resolve_target` 讀真實卡解析 owner/label/狀態、pending 生命週期(insert→load→_pending_confirmations→resolve confirmed=1→冪等 re-resolve=0→cleanup)、postback/confirm-reject flex 結構皆通過。
-- [ ] 8.2 （需真實按鈕）廠商按完成 → Trello 生效 + 稽核留言 + supervisor 收通知；supervisor 確認/退回（退回還原）。outward-facing，留待真人按鈕 E2E。
+- [x] 8.2 pod 內真實 E2E（larryoffice=廠商、larry=主管、創世紀M3 card「20.保護進場」兩個 test 工項）：廠商標記完成→Trello 暫定生效+pending+稽核留言「待主管確認」；主管確認(定案,冪等)；主管直接標記(免追認,不建pending)；廠商標記→主管退回→Trello 還原+rejected；非owner婉拒零寫入；冪等不重寫；每次寫入 publish cache-invalidate。Trello 留言與活動 5 則稽核留言齊全（操作者+台北時間+動作+label）。板面復原乾淨。LINE-UI push 腿因免費版 200/月額度用罄暫緩，待額度重置/升級。
 
 ## 9. 上線
 
