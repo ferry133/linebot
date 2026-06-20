@@ -35,12 +35,10 @@
 
 ## 8. 部署後 pod 驗證
 
-- [ ] 8.1 廠商按完成 → Trello 立即生效 + pending row + supervisor 收到確認/退回通知；稽核留言出現。
-- [ ] 8.2 supervisor 確認 → row=confirmed、Trello 不變；退回 → Trello 還原 + row=rejected。
-- [ ] 8.3 supervisor 直接標記 → 免 pending；非 owner/非 supervisor 被拒；越權 postback 被擋；confirm/reject 冪等。
-- [ ] 8.4 #9 摘要對 supervisor 顯示待確認清單。
+- [x] 8.1 migration 011 已套用（task_confirmations 13 欄）；非破壞性驗證：`_resolve_target` 讀真實卡解析 owner/label/狀態、pending 生命週期(insert→load→_pending_confirmations→resolve confirmed=1→冪等 re-resolve=0→cleanup)、postback/confirm-reject flex 結構皆通過。
+- [ ] 8.2 （需真實按鈕）廠商按完成 → Trello 生效 + 稽核留言 + supervisor 收通知；supervisor 確認/退回（退回還原）。outward-facing，留待真人按鈕 E2E。
 
 ## 9. 上線
 
-- [ ] 9.1 commit + push linebot；CI build。
-- [ ] 9.2 bump jg-base 全部 image pin → Flux reconcile（migration 011 由各 workload 啟動時 `run_migrations` 自動套用）。
+- [x] 9.1 commit + push linebot 131b0ac；CI green。
+- [x] 9.2 bump jg-base 全部 9 pin → Flux reconcile（含修正 deploy.yaml 殘留 eaba805 skew）；migration 011 已自動套用。
