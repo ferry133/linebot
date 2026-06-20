@@ -38,6 +38,7 @@ from trello_line_notifier import (
     set_checkitem_state, set_card_due_complete, add_card_comment,
     _internal_recipients,
 )
+from shared.guide import guide_messages, GUIDE_KEYWORDS
 
 TRELLO_INVALIDATE_TOPIC = "agents/trello/invalidate"
 
@@ -242,6 +243,11 @@ class CustomerServiceAgent:
 
         text = payload.get("text", "")
         if not text:
+            return
+        # 關鍵字「使用說明」備援入口（Rich Menu 圖片缺失時仍可觸發）
+        if text.strip() in GUIDE_KEYWORDS:
+            log.info(f"[{AGENT_ID}] Guide keyword from {user_id[:8]}")
+            threading.Thread(target=self._handle_guide, args=(user_id, reply_token), daemon=True).start()
             return
         log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
@@ -494,6 +500,17 @@ class CustomerServiceAgent:
             "user_id": user_id, "content": content, "reply_token": reply_token,
         })
 
+    def _handle_guide(self, user_id: str, reply_token: str | None, pb: dict | None = None):
+        """LINE 對話內線上說明：主題選單 / 單一主題 / 完整手冊（依角色）。走 Reply API。"""
+        _display, _alias, role = self._user_identity(user_id)  # 查無記錄 → visitor
+        msgs = guide_messages(role, pb)
+        if not msgs:
+            self._reply(user_id, "目前沒有可用的使用說明，請聯繫服務人員。", reply_token)
+            return
+        self.broker.publish(OUTBOX_TOPIC, {
+            "user_id": user_id, "messages": msgs, "reply_token": reply_token,
+        })
+
     def _invalidate_trello_cache(self):
         try:
             self.broker.publish(TRELLO_INVALIDATE_TOPIC, {"ts": datetime.now(TAIPEI).isoformat()})
@@ -541,6 +558,8 @@ class CustomerServiceAgent:
                 self._handle_status_update(user_id, pb, reply_token)
             elif op in ("confirm", "reject"):
                 self._handle_confirmation(user_id, pb, reply_token)
+            elif op == "guide":
+                self._handle_guide(user_id, reply_token, pb)
             else:
                 self._reply(user_id, "未知動作。", reply_token)
         except Exception as e:

@@ -70,23 +70,30 @@ def _upsert_line_user(user_id: str):
 
 # ── LINE Push API ─────────────────────────────────────────────────────────────
 
-def push_line(user_id: str, text: str):
+def _as_messages(payload_or_text) -> list:
+    """接受純文字或 LINE message dict 陣列，正規化為 messages 陣列（上限 5 則）。"""
+    if isinstance(payload_or_text, str):
+        return [{"type": "text", "text": payload_or_text[:5000]}]
+    return list(payload_or_text)[:5]
+
+
+def push_line(user_id: str, messages):
     resp = requests.post(
         "https://api.line.me/v2/bot/message/push",
         headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-        json={"to": user_id, "messages": [{"type": "text", "text": text}]},
+        json={"to": user_id, "messages": _as_messages(messages)},
         timeout=10,
     )
     if resp.status_code != 200:
         print(f"[GW] Push API failed {user_id[:8]}: HTTP {resp.status_code} {resp.text}")
 
 
-def reply_line(reply_token: str, text: str) -> bool:
+def reply_line(reply_token: str, messages) -> bool:
     """Reply via the free Reply API. Returns False if the token is unusable."""
     resp = requests.post(
         "https://api.line.me/v2/bot/message/reply",
         headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-        json={"replyToken": reply_token, "messages": [{"type": "text", "text": text}]},
+        json={"replyToken": reply_token, "messages": _as_messages(messages)},
         timeout=10,
     )
     if resp.status_code != 200:
@@ -99,16 +106,17 @@ def reply_line(reply_token: str, text: str) -> bool:
 
 def _on_outbox(payload: dict):
     user_id = payload.get("user_id", "")
-    content = payload.get("content", "")
     reply_token = payload.get("reply_token")
-    if not content:
+    # 支援結構化 messages（Flex 等）或單純 content 文字
+    messages = payload.get("messages") or payload.get("content", "")
+    if not messages:
         return
     # Prefer the free Reply API; fall back to Push when there is no usable
     # reply token (absent, expired, or already used).
-    if reply_token and reply_line(reply_token, content):
+    if reply_token and reply_line(reply_token, messages):
         return
     if user_id:
-        push_line(user_id, content)
+        push_line(user_id, messages)
 
 
 # ── Webhook ───────────────────────────────────────────────────────────────────

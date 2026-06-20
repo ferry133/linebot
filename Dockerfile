@@ -12,6 +12,7 @@ COPY migrations/ ./migrations/
 COPY shared/ ./shared/
 COPY agents/ ./agents/
 COPY gateway/ ./gateway/
+COPY docs/ ./docs/
 
 RUN pip install --no-cache-dir requests flask anthropic psycopg2-binary "paho-mqtt>=2.0" pyyaml pillow pillow-heif
 

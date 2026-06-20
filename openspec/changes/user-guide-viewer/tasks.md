@@ -1,38 +1,41 @@
-## 1. 檢視頁（agents/admin_server.py）
+## 1. 線上說明內容模組（shared/guide.py）
 
-- [ ] 1.1 新增 `GET /guide`（**不**加 `@require_auth`）：解析 query `t`、驗 HMAC 簽章與到期、取 `role`。
-- [ ] 1.2 token helper：`make_guide_token(role, ttl)` / `verify_guide_token(t)`，用 `GUIDE_SIGNING_SECRET`（`HMAC_SHA256(secret, f"{role}|{exp}")`，base64url）。
-- [ ] 1.3 渲染：讀 `docs/<role>-guide.md` → markdown 轉 HTML → 套極簡 RWD CSS（手機可讀、`<meta viewport>`）。驗證失敗回 401/失效頁。
-- [ ] 1.4 角色白名單：五種角色 `admin/employee/vendor/customer/visitor` 皆有對應 `docs/<role>-guide.md`；未知 role 回 404。
+- [x] 1.1 載入 `docs/<role>-guide.md`、以 `## ` 切段（跳過 H1/前言），回傳 `[(title, body)]`。
+- [x] 1.2 markdown→LINE 文字：`**粗體**`/`` `code` ``去標記、`[t](u)`→`t（u）`、表格列→「・a ｜ b」、`---`→分隔線、`>`→「💬」。
+- [x] 1.3 組訊息：主題選單（Flex 按鈕 `o=guide&s=i` + 完整手冊 `o=guide&s=all`）。
+- [x] 1.4 組訊息：單一主題（Flex：位置 `(i/N)`、內文、上一/下一/目錄/全部；首末節省略對應箭頭）。
+- [x] 1.5 組訊息：完整手冊（文字分則 ≤5000×≤4 + 標「▶ 你在這」+ 回目錄 Flex）。
+- [x] 1.6 `guide_messages(role, pb)` 入口：依 `s`/`c` 回主題選單/單一主題/完整手冊；查無內容回 []。
 
-## 2. bot 派發（agents/customer_service.py）
+## 2. gateway 支援 Flex 訊息（gateway/line_gateway.py）
 
-- [ ] 2.1 `_process_postback` 新增 `op=="guide"` → `_handle_guide(user_id, reply_token)`。
-- [ ] 2.2 `_handle_guide`：查 `role`（查無記錄→visitor）→ 為五種角色之任一產生簽章連結（`make_guide_token` + `GUIDE_HOST`），以 Reply API 回覆含連結訊息。
-- [ ] 2.3（備援）關鍵字「使用說明」文字訊息亦走同一 `_handle_guide`，供 rich menu 圖片缺失時使用。
+- [x] 2.1 `_on_outbox` 支援 `messages` 陣列（Flex 等），reply/push 共用，單次 ≤5 則；無則回退 `content` 文字。
 
-## 3. Rich Menu（gateway/ 一次性腳本）
+## 3. bot 派發（agents/customer_service.py）
 
-- [ ] 3.1 新增 `gateway/setup_richmenu.py`：建立 rich menu（含「📖 使用說明」區塊，`postback` `data=o=guide`）、上傳圖片、設為 `richmenu/all` 預設。
-- [ ] 3.2 準備 rich menu 圖片資產（2500×843 PNG，置 `assets/`）。
+- [x] 3.1 `op=="guide"` → `_handle_guide(user_id, reply_token, pb)`；查角色 → `guide_messages` → 以 `messages` 經 OUTBOX 回覆。
+- [x] 3.2 關鍵字「使用說明」等文字訊息走同一 `_handle_guide`（主題選單）。
 
-## 4. 打包 / 設定
+## 4. Rich Menu（gateway/setup_richmenu.py）
 
-- [ ] 4.1 Dockerfile 新增 `COPY docs/ ./docs/`（檢視頁需讀 md）；pip 增加 `markdown`。
-- [ ] 4.2 新增 env `GUIDE_SIGNING_SECRET`（bot 與 admin 同值）與 `GUIDE_HOST`（檢視頁網址）；記錄於 CLAUDE.md env 表與 jg-base secret。
+- [x] 4.1 一次性腳本：建立含「📖 使用說明」整塊 `postback o=guide` 的 rich menu、PIL 自動產底圖（或 `--image`）、設為 `richmenu/all` 預設。
 
-## 5. 本機驗證
+## 5. 清理（不再需要網頁/token 路線）
 
-- [ ] 5.1 `make/verify_guide_token` 往返測試（有效/過期/竄改/無 token）。
-- [ ] 5.2 五檔 `ast.parse`；stub 匯入 `_handle_guide`、`GET /guide` 以 Flask test_client 驗 401/200 與角色對應 md。
+- [x] 5.1 移除 `shared/guide_token.py`、admin `/guide` 路由與 `markdown` 依賴、`GUIDE_HOST`/`GUIDE_SIGNING_SECRET` env；保留 Dockerfile `COPY docs/`（customer-service 讀取）。
 
-## 6. 部署
+## 6. 本機驗證
 
-- [ ] 6.1 commit + push linebot；CI green。
-- [ ] 6.2 bump jg-base 全部 9 image pins → Flux reconcile；設 `GUIDE_SIGNING_SECRET`/`GUIDE_HOST` secret。
-- [ ] 6.3 執行 `setup_richmenu.py` 設定 default rich menu（一次性）。
+- [x] 6.1 五檔 `ast.parse`；無殘留 token/web 參照。
+- [x] 6.2 `guide_messages` 五角色主題數、主題選單按鈕、單一主題位置/導覽（首末節邊界）、完整手冊「你在這」/分則/≤5 則 皆通過。
 
-## 7. 部署後驗證
+## 7. 部署
 
-- [ ] 7.1 pod 內確認 `docs/*.md` 存在、`/guide` 用有效 token 回 200 並渲染對應角色手冊、過期/竄改回 401。
-- [ ] 7.2 真機：LINE 點「📖 使用說明」→ 依角色收到正確手冊連結（員工/廠商/管理員各驗一次；customer/visitor 得導引訊息）。
+- [ ] 7.1 commit + push linebot；CI green。
+- [ ] 7.2 bump jg-base 全部 9 image pins → Flux reconcile。
+- [ ] 7.3 執行 `setup_richmenu.py` 設定 default rich menu（一次性）。
+
+## 8. 部署後驗證
+
+- [ ] 8.1 pod 內確認 `docs/*.md` 存在；以 stub broker 呼叫 `_handle_guide` 驗主題選單/主題/完整手冊訊息正確。
+- [ ] 8.2 真機：LINE 點「📖 使用說明」→ 主題選單 → 點主題（看位置與上一/下一）→ 完整手冊（看「你在這」）→ 回目錄；五角色各抽驗。
