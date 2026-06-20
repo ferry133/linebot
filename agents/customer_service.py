@@ -32,7 +32,14 @@ import yaml
 from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
 from shared.db import db_exec
-from trello_line_notifier import TAIPEI, send_line
+from trello_line_notifier import (
+    TAIPEI, send_line, send_flex,
+    get_card, parse_tag,
+    set_checkitem_state, set_card_due_complete, add_card_comment,
+    _internal_recipients,
+)
+
+TRELLO_INVALIDATE_TOPIC = "agents/trello/invalidate"
 
 AGENT_ID = "customer_service"
 INBOX_TOPIC = f"agents/{AGENT_ID}/inbox"
@@ -224,10 +231,18 @@ class CustomerServiceAgent:
 
     def _on_message(self, payload: dict):
         user_id = payload.get("user_id", "unknown")
+        reply_token = payload.get("reply_token")
+
+        # 提醒卡片按鈕（完成/取消、主管確認/退回）— 結構化動作，不進 Claude loop
+        if payload.get("kind") == "postback":
+            pb = payload.get("postback", {})
+            log.info(f"[{AGENT_ID}] Postback from {user_id[:8]}: {pb}")
+            threading.Thread(target=self._process_postback, args=(user_id, pb, reply_token), daemon=True).start()
+            return
+
         text = payload.get("text", "")
         if not text:
             return
-        reply_token = payload.get("reply_token")
         log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
         threading.Thread(target=self._process, args=(user_id, text, reply_token), daemon=True).start()
@@ -470,6 +485,224 @@ class CustomerServiceAgent:
                         send_line(uid, msg)
             except Exception:
                 pass
+
+
+    # ── 工項完成狀態更新（提醒卡片按鈕 / 主管追認）──────────────────────────────
+
+    def _reply(self, user_id: str, content: str, reply_token: str | None):
+        self.broker.publish(OUTBOX_TOPIC, {
+            "user_id": user_id, "content": content, "reply_token": reply_token,
+        })
+
+    def _invalidate_trello_cache(self):
+        try:
+            self.broker.publish(TRELLO_INVALIDATE_TOPIC, {"ts": datetime.now(TAIPEI).isoformat()})
+        except Exception:
+            pass
+
+    def _user_identity(self, user_id: str) -> tuple:
+        """(display_name, alias_name, role) from line_users."""
+        def _q(conn):
+            with conn.cursor() as cur:
+                cur.execute("SELECT display_name, alias_name, role FROM line_users WHERE line_id=%s", (user_id,))
+                return cur.fetchone()
+        try:
+            r = db_exec(_q)
+        except Exception:
+            r = None
+        if not r:
+            return user_id[:8], None, "visitor"
+        if isinstance(r, dict):
+            return (r.get("display_name") or user_id[:8], r.get("alias_name"), r.get("role") or "visitor")
+        return (r[0] or user_id[:8], r[1], r[2] or "visitor")
+
+    def _resolve_target(self, card: dict, source: str, checkitem_id: str | None) -> tuple:
+        """(names, label, currently_complete) for the target work item, or (None, None, None)."""
+        if source == "checklist":
+            for cl in card.get("checklists", []):
+                for it in cl.get("checkItems", []):
+                    if it.get("id") == checkitem_id:
+                        parsed = parse_tag(it["name"])
+                        if not parsed:
+                            return None, None, None
+                        names, _, _, _, label = parsed
+                        return names, (label or it["name"]), (it.get("state") == "complete")
+            return None, None, None
+        parsed = parse_tag((card.get("desc") or "").split("\n")[0])
+        if not parsed:
+            return None, None, None
+        names, _, _, _, label = parsed
+        return names, (label or card.get("name", "")), bool(card.get("dueComplete"))
+
+    def _process_postback(self, user_id: str, pb: dict, reply_token: str | None):
+        try:
+            op = pb.get("o")
+            if op in ("complete", "incomplete"):
+                self._handle_status_update(user_id, pb, reply_token)
+            elif op in ("confirm", "reject"):
+                self._handle_confirmation(user_id, pb, reply_token)
+            else:
+                self._reply(user_id, "未知動作。", reply_token)
+        except Exception as e:
+            log.exception(f"[{AGENT_ID}] postback error: {e}")
+            self._reply(user_id, "處理時發生錯誤，請稍後再試。", reply_token)
+
+    def _handle_status_update(self, user_id: str, pb: dict, reply_token: str | None):
+        op = pb.get("o")
+        card_id = pb.get("c", "")
+        checkitem_id = pb.get("i") or None
+        source = pb.get("s", "card")
+        board_id = pb.get("b", "")
+        complete = (op == "complete")
+        display, alias, role = self._user_identity(user_id)
+        allowed_board_ids, _ = self._get_user_auth(user_id)
+
+        try:
+            card = get_card(card_id)
+        except Exception:
+            self._reply(user_id, "找不到該工項卡片，請稍後再試。", reply_token)
+            return
+        names, label, cur_complete = self._resolve_target(card, source, checkitem_id)
+        if names is None:
+            self._reply(user_id, "找不到該工項，可能已被移除。", reply_token)
+            return
+        # 看板授權（None=不限；list=限定；[]=封鎖）
+        if allowed_board_ids is not None and card.get("idBoard", "") not in set(allowed_board_ids):
+            self._reply(user_id, "您沒有此工地的操作權限。", reply_token)
+            return
+        is_supervisor = role in ("admin", "employee")
+        is_owner = bool(alias) and alias.lower() in [n.lower() for n in names]
+        if not (is_supervisor or is_owner):
+            self._reply(user_id, "僅該工項負責人或主管可標記，您目前無權限。", reply_token)
+            return
+        act = "完成" if complete else "取消完成"
+        if cur_complete == complete:
+            self._reply(user_id, f"「{label}」已是{'完成' if complete else '未完成'}狀態。", reply_token)
+            return
+        # 寫入 Trello
+        if source == "checklist":
+            sc, ok = set_checkitem_state(card_id, checkitem_id, complete)
+        else:
+            sc, ok = set_card_due_complete(card_id, complete)
+        if not ok:
+            self._reply(user_id, f"更新失敗（Trello {sc}），請稍後再試或至看板操作。", reply_token)
+            return
+        self._invalidate_trello_cache()
+        now = datetime.now(TAIPEI).strftime("%Y/%m/%d %H:%M")
+        who = f"{display}（{alias}）" if alias else display
+        suffix = "" if is_supervisor else "（待主管確認）"
+        add_card_comment(card_id, f"🤖 LINE：{who} 於 {now} 標記「{label}」為{act}{suffix}")
+        if is_supervisor:
+            self._reply(user_id, f"已將「{label}」標記為{act}。", reply_token)
+            return
+        # 廠商：暫定生效 + pending + 通知主管
+        cid = self._insert_pending(board_id, card_id, checkitem_id, source, label, op, user_id, alias)
+        if cid is not None:
+            self._notify_supervisors(label, who, act, cid)
+        self._reply(user_id, f"已暫定將「{label}」標記為{act}，將通知主管確認。", reply_token)
+
+    def _handle_confirmation(self, user_id: str, pb: dict, reply_token: str | None):
+        cid = pb.get("cid")
+        display, _alias, role = self._user_identity(user_id)
+        if role not in ("admin", "employee"):
+            self._reply(user_id, "僅主管可確認/退回。", reply_token)
+            return
+        row = self._load_pending(cid)
+        if not row:
+            self._reply(user_id, "查無此待確認項目。", reply_token)
+            return
+        if row["status"] != "pending":
+            self._reply(user_id, "此項目已處理。", reply_token)
+            return
+        label, card_id, checkitem_id = row["label"], row["card_id"], row["checkitem_id"]
+        source, target_state = row["source"], row["target_state"]
+        now = datetime.now(TAIPEI).strftime("%Y/%m/%d %H:%M")
+        if pb.get("o") == "confirm":
+            self._resolve_pending(cid, "confirmed", user_id)
+            add_card_comment(card_id, f"✅ LINE：主管 {display} 於 {now} 確認「{label}」")
+            self._reply(user_id, f"已確認「{label}」。", reply_token)
+        else:  # reject → 還原 Trello 為 claim 前狀態
+            revert_complete = (target_state != "complete")
+            if source == "checklist":
+                set_checkitem_state(card_id, checkitem_id, revert_complete)
+            else:
+                set_card_due_complete(card_id, revert_complete)
+            self._invalidate_trello_cache()
+            self._resolve_pending(cid, "rejected", user_id)
+            add_card_comment(card_id, f"❌ LINE：主管 {display} 於 {now} 退回「{label}」，已還原")
+            self._reply(user_id, f"已退回「{label}」並還原狀態。", reply_token)
+
+    def _insert_pending(self, board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias):
+        def _q(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO task_confirmations "
+                    "(board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                    (board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias))
+                r = cur.fetchone()
+                return r["id"] if isinstance(r, dict) else r[0]
+        try:
+            return db_exec(_q)
+        except Exception:
+            return None
+
+    def _load_pending(self, cid):
+        def _q(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, board_id, card_id, checkitem_id, source, label, target_state, status "
+                    "FROM task_confirmations WHERE id=%s", (cid,))
+                return cur.fetchone()
+        try:
+            r = db_exec(_q)
+        except Exception:
+            r = None
+        if not r:
+            return None
+        if isinstance(r, dict):
+            return r
+        keys = ["id", "board_id", "card_id", "checkitem_id", "source", "label", "target_state", "status"]
+        return dict(zip(keys, r))
+
+    def _resolve_pending(self, cid, status, confirmer_user_id):
+        def _q(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE task_confirmations SET status=%s, confirmer_user_id=%s, resolved_at=now() "
+                    "WHERE id=%s AND status='pending'", (status, confirmer_user_id, cid))
+                return cur.rowcount
+        try:
+            return db_exec(_q)
+        except Exception:
+            return 0
+
+    def _notify_supervisors(self, label, who, act, cid):
+        supervisors = _internal_recipients()
+        flex = self._confirm_flex(label, who, act, cid)
+        for uid in supervisors:
+            if not uid:
+                continue
+            try:
+                send_flex(uid, flex, f"待確認：{label}")
+            except Exception as e:
+                log.warning(f"[{AGENT_ID}] notify supervisor failed: {e}")
+
+    def _confirm_flex(self, label, who, act, cid):
+        return {
+            "type": "bubble", "size": "mega",
+            "header": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": "意念情境・待主管確認", "size": "xs", "color": "#AAAAAA"},
+                {"type": "text", "text": f"廠商標記{act}", "weight": "bold", "size": "md", "color": "#EF6C00", "margin": "sm"}]},
+            "body": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": label, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True},
+                {"type": "text", "text": f"由 {who} 標記", "size": "xs", "color": "#666666", "wrap": True, "margin": "sm"},
+                {"type": "box", "layout": "horizontal", "margin": "lg", "spacing": "sm", "contents": [
+                    {"type": "button", "style": "primary", "color": "#388E3C", "height": "sm",
+                     "action": {"type": "postback", "label": "✅ 確認", "data": f"o=confirm&cid={cid}", "displayText": "確認"}},
+                    {"type": "button", "style": "secondary", "height": "sm",
+                     "action": {"type": "postback", "label": "❌ 退回", "data": f"o=reject&cid={cid}", "displayText": "退回"}}]}]},
+        }
 
 
 if __name__ == "__main__":

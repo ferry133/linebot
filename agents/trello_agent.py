@@ -28,6 +28,7 @@ from trello_line_notifier import (
 
 AGENT_ID = "trello_agent"
 REQUEST_TOPIC = "agents/trello/requests"
+INVALIDATE_TOPIC = "agents/trello/invalidate"
 TRELLO_CACHE_TTL = 60
 
 
@@ -51,7 +52,15 @@ class TrelloAgent:
 
     def start(self):
         self.broker.subscribe(REQUEST_TOPIC, self._on_request)
+        self.broker.subscribe(INVALIDATE_TOPIC, self._on_invalidate)
         log.info(f"[{AGENT_ID}] Listening on {REQUEST_TOPIC}")
+
+    def _on_invalidate(self, payload: dict):
+        """A write (by customer-service) happened — drop the scan cache so the next
+        query reflects the new Trello state instead of stale cached items."""
+        self._cache["items"] = None
+        self._cache["ts"] = 0.0
+        log.info(f"[{AGENT_ID}] scan cache invalidated")
 
     def _on_request(self, payload: dict):
         request_id = payload.get("request_id", "")

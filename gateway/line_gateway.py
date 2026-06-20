@@ -118,6 +118,18 @@ def _verify_signature(body: bytes, signature: str) -> bool:
     return base64.b64encode(h).decode() == signature
 
 
+def _parse_postback(data: str) -> dict:
+    """Parse postback `k=v&k=v` data into a dict. Returns {} if empty/malformed."""
+    if not data:
+        return {}
+    out = {}
+    for part in data.split("&"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k] = v
+    return out if out.get("o") else {}
+
+
 @app.route("/health")
 def health():
     return "ok"
@@ -133,13 +145,30 @@ def webhook():
 
     data = request.get_json(force=True, silent=True) or {}
     for event in data.get("events", []):
-        if event.get("type") != "message":
+        etype = event.get("type")
+        user_id = event.get("source", {}).get("userId", "unknown")
+
+        if etype == "postback":
+            # 工項完成/取消 或 主管確認/退回 — 結構化動作，附原始 data 與解析欄位
+            pb = _parse_postback(event.get("postback", {}).get("data", ""))
+            if not pb:
+                continue
+            threading.Thread(target=_upsert_line_user, args=(user_id,), daemon=True).start()
+            broker.publish(INBOX_TOPIC, {
+                "user_id": user_id,
+                "kind": "postback",
+                "postback": pb,
+                "timestamp": event.get("timestamp"),
+                "source": "line",
+                "reply_token": event.get("replyToken"),
+            })
+            continue
+
+        if etype != "message":
             continue
         msg = event.get("message", {})
         if msg.get("type") != "text":
             continue
-
-        user_id = event.get("source", {}).get("userId", "unknown")
         text = msg.get("text", "").strip()
         if not text:
             continue

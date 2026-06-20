@@ -219,6 +219,48 @@ def get_cards(board_id):
     return resp.json()
 
 
+def get_card(card_id):
+    """Fetch one card with its checklists (for owner re-validation on write)."""
+    url = f"https://api.trello.com/1/cards/{card_id}"
+    params = {
+        "key": TRELLO_KEY, "token": TRELLO_TOKEN,
+        "checklists": "all", "fields": "name,desc,idBoard,idList,dueComplete",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ── Trello 寫入（完成狀態 + 稽核留言）─────────────────────────────────────────
+
+def _trello_auth():
+    return {"key": TRELLO_KEY, "token": TRELLO_TOKEN}
+
+
+def set_checkitem_state(card_id, checkitem_id, complete: bool):
+    """PUT checkItem state. Returns (status_code, ok)."""
+    url = f"https://api.trello.com/1/cards/{card_id}/checkItem/{checkitem_id}"
+    params = {**_trello_auth(), "state": "complete" if complete else "incomplete"}
+    resp = requests.put(url, params=params)
+    return resp.status_code, resp.ok
+
+
+def set_card_due_complete(card_id, complete: bool):
+    """PUT card.dueComplete. Returns (status_code, ok)."""
+    url = f"https://api.trello.com/1/cards/{card_id}"
+    params = {**_trello_auth(), "dueComplete": "true" if complete else "false"}
+    resp = requests.put(url, params=params)
+    return resp.status_code, resp.ok
+
+
+def add_card_comment(card_id, text: str):
+    """POST a comment to the card's activity feed (留言與活動). Returns (status_code, ok)."""
+    url = f"https://api.trello.com/1/cards/{card_id}/actions/comments"
+    params = {**_trello_auth(), "text": text[:16000]}
+    resp = requests.post(url, params=params)
+    return resp.status_code, resp.ok
+
+
 def get_board_full(board_id: str) -> dict:
     """Single call: returns {id, name, lists: {id: name}, cards: [...]} for one board."""
     url = f"https://api.trello.com/1/boards/{board_id}"
@@ -326,7 +368,8 @@ def fmt_item(list_name, card_name, body):
     return f"【{list_name}/{card_name}】\n{body}"
 
 
-def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode, internal, is_complete: bool = False):
+def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode, internal, is_complete: bool = False,
+               board_id="", card_id="", checkitem_id=None, source="card"):
     sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}") or [contacts[n] for n in names if n in contacts]
     now_time = datetime.now(TAIPEI).time()
     is_weekday = date.today().weekday() < 5
@@ -335,9 +378,10 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
     # → 打勾完成的工項不再收到到期/逾期通知（#1/#2 開始日不受此限；清單名稱不當抑制）
     active = not is_complete
 
-    # 一筆通知 = ("item", 顏色, 抬頭(到期狀態，放最前面強調), 子標題, 原始文字含完整 tag)
+    # 一筆通知 = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source)
+    # 後四欄供提醒卡片的「標記完成/取消」postback 按鈕定位目標工項。
     def add(uids, headline, color):
-        rec = ("item", color, headline, sub, raw)
+        rec = ("item", color, headline, sub, raw, board_id, card_id, checkitem_id, source)
         for uid in uids:
             notifications.append((uid, board_name, rec))
 
@@ -377,6 +421,20 @@ def _inactive_board_ids() -> set:
     return _db_exec(_q) or set()
 
 
+def _pending_confirmations() -> list:
+    """待主管追認的廠商暫定變更（task_confirmations status=pending）。供 #9 摘要呈現給 supervisor。"""
+    if _db_exec is None:
+        return []
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT label, claimer_alias, target_state, claimed_at "
+                "FROM task_confirmations WHERE status = 'pending' ORDER BY claimed_at"
+            )
+            return cur.fetchall()
+    return _db_exec(_q) or []
+
+
 def run_checks(mode):
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
@@ -410,7 +468,8 @@ def run_checks(mode):
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=is_complete)
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=is_complete,
+                               board_id=board["id"], card_id=card["id"], checkitem_id=None, source="card")
                     if mode == "morning" and _in_summary(start, end, is_complete):
                         summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 
@@ -427,7 +486,8 @@ def run_checks(mode):
                     if not is_complete:
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=is_complete)
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=is_complete,
+                               board_id=board["id"], card_id=card["id"], checkitem_id=item["id"], source="checklist")
                     if mode == "morning" and _in_summary(start, end, is_complete):
                         summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 
@@ -441,7 +501,7 @@ def run_checks(mode):
                         days_stale = (datetime.now(TAIPEI) - last_dt.astimezone(TAIPEI)).days
                         incomplete = [i for i in items if i["state"] == "incomplete"]
                         if incomplete and days_stale >= 3:
-                            rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "")
+                            rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "", "", "", None, "card")
                             for uid in internal:
                                 if uid:
                                     notifications.append((uid, board_name, rec))
@@ -452,7 +512,7 @@ def run_checks(mode):
                             if parsed:
                                 names, _, _, _, _ = parsed
                                 sponsors = [contacts[n] for n in names if n in contacts]
-                                rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "")
+                                rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card")
                                 for uid in sponsors:
                                     notifications.append((uid, board_name, rec))
                                 break
@@ -506,6 +566,18 @@ def run_checks(mode):
             warnings.append(("⚠️ 查無對應 LINE 帳號（未發送通知）", tuple(wlines)))
         if _complete_unfiled:
             warnings.append(("✅ 已完成但未歸『已完成』欄（請移動卡片）", tuple(f"・{s}" for s in _complete_unfiled)))
+        pending = _pending_confirmations()
+        if pending:
+            plines = []
+            for row in pending:
+                label = row["label"] if isinstance(row, dict) else row[0]
+                alias = (row["claimer_alias"] if isinstance(row, dict) else row[1]) or "?"
+                tstate = row["target_state"] if isinstance(row, dict) else row[2]
+                claimed = row["claimed_at"] if isinstance(row, dict) else row[3]
+                act = "完成" if tstate == "complete" else "取消完成"
+                when = claimed.astimezone(TAIPEI).strftime("%m/%d %H:%M") if claimed else ""
+                plines.append(f"・{label}（{alias} 標記{act} {when}）")
+            warnings.append(("⏳ 待主管確認（廠商暫定變更）", tuple(plines)))
         summary_rec = ("summary", now_str, sections, tuple(warnings))
         for uid in internal:
             if uid:
@@ -535,10 +607,32 @@ def run_checks(mode):
     return unique
 
 
+def _postback_data(op, board_id, card_id, checkitem_id, source):
+    """編碼提醒按鈕 postback data（≤300 字元）。op=complete|incomplete；s=card|checklist。"""
+    return f"o={op}&b={board_id}&c={card_id}&i={checkitem_id or ''}&s={source}"
+
+
+def _status_buttons(board_id, card_id, checkitem_id, source):
+    """提醒卡片上的「標記完成 / 取消完成」postback 按鈕列。"""
+    return {
+        "type": "box", "layout": "horizontal", "margin": "md", "spacing": "sm",
+        "contents": [
+            {"type": "button", "style": "primary", "color": "#388E3C", "height": "sm",
+             "action": {"type": "postback", "label": "✅ 標記完成",
+                        "data": _postback_data("complete", board_id, card_id, checkitem_id, source),
+                        "displayText": "標記完成"}},
+            {"type": "button", "style": "secondary", "height": "sm",
+             "action": {"type": "postback", "label": "↩︎ 取消完成",
+                        "data": _postback_data("incomplete", board_id, card_id, checkitem_id, source),
+                        "displayText": "取消完成"}},
+        ],
+    }
+
+
 def build_flex(items, mode_label):
     """將同一收件人的 (board_name, rec) 清單組成 LINE Flex 訊息 contents。
-    rec = ("item", 顏色, 抬頭, 子標題, 原始文字) 或 ("summary", 文字)。
-    每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag。"""
+    rec = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source) 或 ("summary", …)。
+    每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag，附完成/取消按鈕。"""
     board_order = []
     by_board = {}
     summaries = []
@@ -555,13 +649,17 @@ def build_flex(items, mode_label):
     for board in board_order:
         body = []
         for i, rec in enumerate(by_board[board]):
-            _, color, headline, sub, raw = rec
+            color, headline, sub, raw = rec[1], rec[2], rec[3], rec[4]
+            board_id, card_id, checkitem_id, source = (
+                (rec[5], rec[6], rec[7], rec[8]) if len(rec) >= 9 else ("", "", None, "card"))
             block = [
                 {"type": "text", "text": headline, "weight": "bold", "color": color, "size": "md", "wrap": True},
                 {"type": "text", "text": sub, "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
             ]
             if raw:
                 block.append({"type": "text", "text": raw, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
+            if card_id:
+                block.append(_status_buttons(board_id, card_id, checkitem_id, source))
             box = {"type": "box", "layout": "vertical", "contents": block}
             if i > 0:
                 body.append({"type": "separator", "margin": "lg"})

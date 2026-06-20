@@ -38,6 +38,7 @@ MIGRATIONS = [
     "008_project_photo_folder.sql",
     "009_project_gps.sql",
     "010_sites.sql",
+    "011_task_confirmations.sql",
 ]
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent / "migrations"
