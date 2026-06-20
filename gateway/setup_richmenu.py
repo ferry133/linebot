@@ -61,23 +61,26 @@ def _load_font(size):
                 return ImageFont.truetype(p, size)
             except Exception:
                 pass
-    return ImageFont.load_default()
+    return None  # 無可縮放/CJK 字型（如 slim 容器）
 
 
 def _generate_image() -> bytes:
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (WIDTH, HEIGHT), "#06c755")
     d = ImageDraw.Draw(img)
-    label = "📖  使用說明"
-    sub = "點此查看你的操作說明"
-    f1, f2 = _load_font(220), _load_font(96)
-    for text, font, y in ((label, f1, HEIGHT * 0.30), (sub, f2, HEIGHT * 0.66)):
-        try:
-            l, t, r, b = d.textbbox((0, 0), text, font=font)
-            w = r - l
-        except Exception:
-            w = font.getlength(text) if hasattr(font, "getlength") else len(text) * 10
-        d.text(((WIDTH - w) / 2, y), text, fill="#ffffff", font=font)
+    f1 = _load_font(210)
+    if f1 is not None:
+        # 有 CJK 字型（如在 macOS 執行）→ 直接畫中文
+        f2 = _load_font(92)
+        for text, font, y in (("📖  使用說明", f1, int(HEIGHT * 0.26)),
+                              ("點此查看你的操作說明", f2, int(HEIGHT * 0.60))):
+            box = d.textbbox((0, 0), text, font=font)
+            d.text(((WIDTH - (box[2] - box[0])) / 2, y), text, fill="#ffffff", font=font)
+    else:
+        # 無字型（slim 容器）→ 乾淨幾何設計，避免中文變方框；文字標籤由 chatBarText 顯示
+        d.rounded_rectangle([110, 110, WIDTH - 110, HEIGHT - 110], radius=70, outline="#ffffff", width=16)
+        d.rounded_rectangle([WIDTH * 0.34, HEIGHT * 0.40, WIDTH * 0.66, HEIGHT * 0.60],
+                            radius=44, fill="#ffffff")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

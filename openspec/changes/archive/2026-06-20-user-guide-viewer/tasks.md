@@ -31,11 +31,11 @@
 
 ## 7. 部署
 
-- [ ] 7.1 commit + push linebot；CI green。
-- [ ] 7.2 bump jg-base 全部 9 image pins → Flux reconcile。
-- [ ] 7.3 執行 `setup_richmenu.py` 設定 default rich menu（一次性）。
+- [x] 7.1 commit + push linebot；CI green。
+- [x] 7.2 bump jg-base 全部 9 image pins → Flux reconcile。
+- [x] 7.3 執行 `setup_richmenu.py` 設定 default rich menu（一次性）。
 
 ## 8. 部署後驗證
 
-- [ ] 8.1 pod 內確認 `docs/*.md` 存在；以 stub broker 呼叫 `_handle_guide` 驗主題選單/主題/完整手冊訊息正確。
+- [x] 8.1 pod 內確認 `docs/*.md` 存在；以 stub broker 呼叫 `_handle_guide` 驗主題選單/主題/完整手冊訊息正確。
 - [ ] 8.2 真機：LINE 點「📖 使用說明」→ 主題選單 → 點主題（看位置與上一/下一）→ 完整手冊（看「你在這」）→ 回目錄；五角色各抽驗。

@@ -311,7 +311,14 @@ class CustomerServiceAgent:
         role, user_projects = _get_user_role_and_projects(user_id)
         if user_projects:
             names = "、".join(p["name"] for p in user_projects)
-            system += f"\n\n## 此使用者的進行中專案\n{names}\n當使用者提到專案時，請以這些「專案名稱」（非 Trello 看板名稱）來辨識與回應。"
+            system += (
+                f"\n\n## 此使用者身分與專案（系統已確認，請勿再詢問他是誰）\n"
+                f"此使用者目前進行中的專案：{names}\n"
+                f"- 當他說「我／我的案子／我有哪些工作／我這邊」時，即指上述專案。\n"
+                f"- 請直接用 query_trello 查這些專案作答，切勿反問他是誰、也不要他報名字或案場。\n"
+                f"- 請以「專案名稱」（非 Trello 看板名稱）辨識與回應。\n"
+                f"- 若過往對話或範例與此衝突，以本段為準。"
+            )
 
         history = self.memory.get_working(user_id)
         new_messages = [{"role": "user", "content": user_message}]
@@ -400,6 +407,10 @@ class CustomerServiceAgent:
     def _evaluate(self, result: ActionResult) -> float:
         if result.error:     return 0.1
         if result.escalated: return 0.5
+        # 未呼叫任何工具的回答（純文字／反問身分）一律低於「成功」門檻(>0.7)，
+        # 避免「沒查就回」被存成成功 episode 並被 _recall 回放而自我增強。
+        if not result.tools_used:
+            return 0.6 if len(result.final_text) > 20 else 0.3
         if len(result.final_text) > 100: return 0.8
         if len(result.final_text) > 20:  return 0.6
         return 0.3
