@@ -7,134 +7,144 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 「意念情境室內裝修」LINE 客服 Robot + 工程通知系統。
 
 兩大功能：
-1. **客服 Bot**（雙向）：客戶透過 LINE 詢問任意問題 → Claude API 理解並查詢 Trello → 即時回覆；無法回答時推播管理群組。
-2. **定時通知**（單向）：CronJob 定時掃描 Trello，依九項觸發條件推播工程提醒給客戶與內部人員。
+1. **客服 Bot**（雙向）：客戶/廠商/主管透過 LINE 詢問 → Claude 理解並查 Trello → 即時回覆（優先走免費 Reply API）；無法回答時升級管理群組。
+2. **每日工程通知**（單向）：單一每日 CronJob 掃描 Trello，依九項觸發條件（#1–#9）產出提醒。**主動 push 僅送廠商（vendor）**；主管/客戶改由 Rich Menu「今日提醒」on-demand 拉取（reply＝免費）。
+
+> 架構已從早期單體 `linebot_server.py` 演進為 **MQTT 多 agent**。`linebot_server.py` 為 legacy，**已不部署**。行為規格以 `openspec/specs/` 為準。
 
 ## Commands
 
 ```bash
-# 安裝依賴
-pip3 install requests flask anthropic psycopg2-binary
+# 安裝依賴（與 Dockerfile 一致）
+pip3 install requests flask anthropic psycopg2-binary "paho-mqtt>=2.0" pyyaml pillow pillow-heif
 
-# 啟動客服 Bot Webhook Server
-python3 linebot_server.py
+# 各 workload（同一 image，不同進入點；本機需設好環境變數）
+python3 gateway/line_gateway.py        # Flask Webhook + Reply/Push 出口
+python3 agents/customer_service.py     # 客服 agent（Claude 五步循環）
+python3 agents/trello_agent.py         # Trello 查詢 agent（掃描+快取+owner 過濾）
+python3 agents/admin_server.py         # 管理 API（/api/*）+ 啟動時 run_migrations()
 
-# 執行定時通知（需先設定環境變數）
-python3 trello_line_notifier.py [morning|noon|evening]
+# 每日通知（合併批次，取代舊 morning/noon/evening）
+python3 trello_line_notifier.py daily  # noon/evening 為相容 no-op；test 發測試訊息
 
-# 測試 LINE 發送
-python3 trello_line_notifier.py test
+# Rich Menu（一次性；需 LINE_CHANNEL_ACCESS_TOKEN，容器內含 fonts-noto-cjk 可畫中文）
+python3 gateway/setup_richmenu.py --replace
 ```
 
 ## Architecture
 
 ```
-客戶 LINE → LINE Platform → POST /webhook
-                                  ↓
-                         linebot_server.py (Flask)
-                           ├─ 驗簽 (HMAC-SHA256)
-                           ├─ 立即回 200（避免 LINE 10s timeout 重送）
-                           ├─ threading.Thread → _process_message(user_id, text)
-                           │    ├─ 對話記憶 (LRU OrderedDict，MAX_USERS=500，每人 20 則)
-                           │    ├─ Claude API (claude-haiku-4-5) with tools:
-                           │    │    ├─ query_trello(query_type, keyword)
-                           │    │    └─ escalate_to_manager(reason, customer_question)
-                           │    └─ Push API → 回覆客戶（非 Reply API）
-                           │              ↓ escalate
-                           │         Push → LINE_NOTIFY_GROUP_ID（管理群組）
+客戶/廠商/主管 LINE → POST /webhook
+        ↓
+gateway/line_gateway.py (Flask)
+  ├─ 驗簽 (HMAC-SHA256)；postback 解析 o=...
+  ├─ 自動 upsert line_users（建檔）
+  ├─ publish → MQTT agents/customer_service/inbox（夾帶 reply_token）
+  └─ 訂閱 gateway/outbox → 出口：有 reply_token 先用 Reply API（免費），失敗才 Push API
 
-CronJob → trello_line_notifier.py [morning|noon|evening]
-                           ├─ Trello API 掃描所有工項
-                           ├─ 九項觸發條件判斷
-                           └─ LINE Push API → 客戶 / SA / Larry
+agents/customer_service.py（獨立 process，五步循環 Perceive→Recall→Reason→Act→Reflect）
+  ├─ 文字訊息 → Claude agentic loop（model claude-haiku-4-5-20251001, MAX_TOOL_TURNS=5）
+  │    tools: query_trello / get_project_photos / escalate_to_manager
+  ├─ postback：o=complete|incomplete（標記工項）/ o=confirm|reject（主管追認）
+  │            / o=guide（線上說明）/ o=daily（今日提醒 → 每日 Flex）
+  ├─ 關鍵字備援：GUIDE_KEYWORDS → 說明；DAILY_KEYWORDS → 今日提醒（同 o=daily Flex）
+  └─ query_trello 委託 → MQTT agents/trello/requests（帶 allowed_board_ids + owner_alias）
+
+agents/trello_agent.py：掃描 Trello（60s 快取，可被 invalidate）、依 allowed_board_ids（板層）
+  與 owner_alias（廠商 owner 層）過濾後回覆
+agents/trello_board_sync.py：每日同步看板名稱 → trello_boards 表（CronJob 0 19 * * *）
+
+CronJob trello-notifier-daily（08:00 Asia/Taipei，週日至週五 0-5）
+  → trello_line_notifier.py daily
+       ├─ run_checks()：一次評估 #1–#9（合併原三批次；#6 逾期所有執行日皆呈現）
+       ├─ build_daily_messages_for_user()：共用內容引擎（push 與 on-demand 拉取共用）
+       ├─ 主動 push 僅送 role=vendor；空內容不送（skip-empty）
+       └─ 主管摘要 + 可操作「待主管確認」卡（專案+卡片+label+確認/退回）僅於主管拉取時呈現
 ```
 
-同一個 Docker image，執行模式由 k8s workload 的 `command` 指定：
-- **Webhook server**: `python /app/linebot_server.py`
-- **CronJob**: `python /app/trello_line_notifier.py [morning|noon|evening]`
+同一個 Docker image，執行模式由 k8s workload 的 `command` 指定。
 
 ## Key Files
 
 | 檔案 | 說明 |
 |------|------|
-| `linebot_server.py` | Flask Webhook + Claude agentic loop + 工具實作 |
-| `trello_line_notifier.py` | 定時通知腳本（共用 Trello 查詢函式被 linebot_server import） |
-| `gantt_generator.py` | 從 Trello 產生甘特圖 CSV（26 週，可匯入 Google Sheets） |
-| `Dockerfile` | 容器映像建置，推至 GHCR（無 ENTRYPOINT，由 k8s command 指定） |
-| `trello-line-design.md` | 觸發條件完整設計文件 |
+| `gateway/line_gateway.py` | Flask Webhook；Reply 優先/Push fallback 出口；postback 解析 |
+| `gateway/setup_richmenu.py` | 一次性建立 Rich Menu（左 `o=daily` 今日提醒、右 `o=guide` 使用說明）|
+| `agents/customer_service.py` | 客服 agent：Claude 五步循環、postback/keyword 路由、RBAC、確認流程 |
+| `agents/trello_agent.py` | Trello 查詢 agent：掃描+快取+板層/owner 過濾 |
+| `agents/trello_board_sync.py` | 每日同步看板名稱到 DB |
+| `agents/admin_server.py` | 管理 API + 啟動跑 `run_migrations()` |
+| `trello_line_notifier.py` | 每日通知 + 共用 Trello 函式/內容引擎（被 agents import）|
+| `shared/db.py` | DB pool + migrations 清單 |
+| `shared/broker.py` `shared/guide.py` | MQTT client；線上說明內容 |
+| `gantt_generator.py` | 從 Trello 產生甘特圖 CSV |
+| `linebot_server.py` | **legacy 單體，已不部署** |
+| `openspec/specs/` | 行為規格（真實來源）；變更走 `/opsx:propose` |
+
+## Notification & Visibility Model（重要）
+
+- **三批次→單一每日批次**：每日一次（08:00 Sun–Fri）評估 #1–#9，每人一則整合 Flex carousel。
+- **主動 push 僅 vendor**；admin/employee/customer 不被 push。
+- **On-demand 拉取**：Rich Menu「今日提醒」(`o=daily`) 或輸入 DAILY_KEYWORDS → 經 **Reply API（免費）** 回該使用者角色對應內容。主管得摘要+可操作確認卡；廠商/客戶得自己的工項。
+- **廠商標記工項**：暫定生效 + 建 `task_confirmations` pending（含 card_name 快照）；**不即時推主管**，待主管於每日內容追認/退回。
+- 詳見 specs：`consolidated-daily-notification`、`daily-notice-on-demand`、`notification-daily-summary`、`trello-task-status-update`。
+
+## RBAC（角色與可見性）
+
+| Role | 可見範圍 |
+|------|---------|
+| admin / employee | 所有專案（無限制）|
+| vendor | **僅自己被 `[@(alias)]` 標記的工項**（tag 為唯一依據，與板層指派無關）|
+| customer | 僅其 `line_user_projects` 指定看板（整看板，屋主看全貌）|
+| visitor | 無 |
+
+- 對話查詢：customer-service 帶 `allowed_board_ids`（vendor=None、customer=board 清單）+ `owner_alias`（vendor=自身 alias）給 trello-agent。
+- 權限一律從 `line_user_projects` JOIN `projects` 查，**不得**用 `line_users.projects` JSONB。
+- 角色/指派變更會清 `working_memory`（避免 Claude 從舊對話繞過 RBAC）。詳見 spec `role-based-access-control`。
 
 ## Environment Variables
 
 | 變數 | 用途 |
 |------|------|
-| `ANTHROPIC_API_KEY` | Claude API 金鑰（linebot_server 需要） |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API 金鑰 |
-| `LINE_CHANNEL_SECRET` | LINE Webhook 驗簽密鑰 |
-| `LINE_NOTIFY_GROUP_ID` | 升級通知的 LINE 群組 ID |
+| `ANTHROPIC_API_KEY` | Claude API 金鑰 |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API（push/reply/richmenu/profile）|
+| `LINE_CHANNEL_SECRET` | Webhook 驗簽 |
+| `LINE_NOTIFY_GROUP_ID` | escalate 升級通知群組（未設定 fallback sa/larry）|
 | `TRELLO_API_KEY` / `TRELLO_TOKEN` | Trello API 憑證 |
-
-## linebot_server 設計細節
-
-### Claude Agentic Loop
-- **Model**: `claude-haiku-4-5-20251001`
-- **MAX_HISTORY**: 20 則（in-memory LRU per user_id，重啟後清空）
-- **MAX_USERS**: 500（LRU eviction，超過時淘汰最久未使用的 user）
-- **MAX_TOOL_TURNS**: 5 輪（防止無限迴圈）
-- **Webhook** 立即回 200，背景 `threading.Thread` 執行 Claude + Trello（避免超過 LINE 10s timeout 觸發重送）
-- **Push API** 回覆客戶（非 Reply API；Reply token 在背景處理完成前已過期）
-- **Push API** 同樣用於 escalate（推管理群組）
-
-### Claude 工具
-
-| 工具 | 觸發時機 | 動作 |
-|------|---------|------|
-| `query_trello(query_type, keyword)` | 客戶詢問進度/排程/逾期 | 掃描全部看板，回傳即時工項清單 |
-| `escalate_to_manager(reason, customer_question)` | Claude 判斷無法回答 | Push 到 `LINE_NOTIFY_GROUP_ID`；未設定時 fallback 推播給 SA / Larry |
-
-`query_type` 可為：`all` / `overdue` / `upcoming`（7 天內到期）/ `specific`（關鍵字）
-
-### Escalation Fallback
-若 `LINE_NOTIFY_GROUP_ID` 未設定，從 `line_contacts.json` 讀取 `sa`、`larry` 的 userId 逐一推播。
+| `DATABASE_URL` | linebot 專屬 PostgreSQL（與 k8scc 分開）|
 
 ## Agent Memory DB
 
-linebot agents 使用**自己獨立的 PostgreSQL**（與 k8scc 分開），用 `agent_id` 隔離各 Agent 的記憶：
+linebot agents 用**獨立 PostgreSQL**，以 `agent_id` 隔離（`customer_service`、`trello_agent`）。
+Schema（`migrations/`，目前到 `012_task_confirmation_card_name.sql`）：
+- `knowledge`（語意）、`episodes`（情節）、`working_memory`（工作）
+- `line_users` / `projects` / `line_user_projects` / `trello_boards` / `sites` / `task_confirmations`
+- migrations 由 `agents/admin_server.py` 啟動時 `run_migrations()` 自動套用。
 
-| agent_id | 擁有者 |
-|----------|--------|
-| `customer_service` | LINE 客服 Agent |
-| `trello_agent` | Trello 查詢 Agent |
+## k8s 部署（jg-base）
 
-**DB Schema**（見 `migrations/001_init.sql`）：
-- `knowledge`：語意記憶，`fact` + `confidence` + `source_count`
-- `episodes`：情節記憶，每次行動紀錄 + 品質評分
-- `working_memory`：工作記憶，對話 messages 陣列
+manifests 在 **`jg-base`**：`kubernetes/apps/extras/default/linebot/`（gateway/agents/admin Deployment）
+與 `.../trello-notifier/`（單一 `trello-notifier-daily` CronJob）。叢集為 **jg-jiahd**（kubeconfig：
+`jg-jiahd/kubeconfig-sa`；linebot namespace；admin 8081）。
 
-**env var 新增**：
+**Release/部署流程**：
+1. 改 linebot 程式碼 → PR → merge `main` → CI（`.github/workflows/build.yaml`）build `ghcr.io/ferry133/linebot:<git-short-sha>`。
+2. jg-base：`scripts/bump-linebot-image.sh <sha>`（一次改 `linebot/app/deploy.yaml`×4、`admin.yaml`、`trello-notifier/app/cronjobs.yaml`；**不動** `migrate-contacts-job.yaml`）。
+3. commit + push jg-base `main`（此 repo 慣例：image bump 直接 commit main）→ `flux reconcile`。
+4. 若改了 Rich Menu，部署後跑一次 `setup_richmenu.py --replace`。
 
-| 變數 | 用途 |
-|------|------|
-| `DATABASE_URL` | linebot 專屬 PostgreSQL 連線字串 |
+⚠️ **image sha 釘在 jg-base 多檔，務必一起改**（用 bump script），否則部分 workload 跑舊 image →
+症狀如「通知 0 收件人 / 行為不一致」。`migrate-contacts-job.yaml`（immutable 完成 Job）**不可** bump。
 
-## k8s 部署備註
-
-此 repo 只含應用程式碼。k8s manifests 在 **`jg-base`**：`kubernetes/apps/extras/default/linebot/`
-（MQTT agents：`gateway/line_gateway.py`、`agents/customer_service.py`、`agents/trello_agent.py`、`agents/admin_server.py`）
-與 `.../trello-notifier/`（3 個通知 CronJob）。`linebot_server.py` 為 legacy 單體，已不部署。
-
-- **同一個 image，不同 `command`**：各 workload 用 `command` 指定執行哪支程式
-- **Secret**：至少 `ANTHROPIC_API_KEY`、`LINE_CHANNEL_ACCESS_TOKEN`、`LINE_CHANNEL_SECRET`、`LINE_NOTIFY_GROUP_ID`、`TRELLO_API_KEY`、`TRELLO_TOKEN`
-- **LINE Developer Console**：Webhook URL 設為 `https://<domain>/webhook`，啟用 webhook
-
-⚠️ **image sha 釘在 jg-base 多個檔案**（`linebot/app/deploy.yaml`、`trello-notifier/app/cronjobs.yaml`、
-`linebot/app/admin.yaml`）。release bump 時務必**全部一起改**，否則部分 workload 跑舊 image →
-症狀如「通知 0 收件人」（cronjobs 留在舊 sha、缺少新版 DB 收件人解析邏輯）。
+- **LINE Developer Console**：Webhook URL `https://<domain>/webhook`，啟用 webhook。
 
 ## Trello 標記格式
 
-只有含 `[@(姓名),日期區間]` 標記的項目才觸發通知邏輯：
+只有含 `[@(姓名/alias),日期區間]` 標記的項目才觸發通知/可見性邏輯（alias 對應 `line_users.alias_name`）：
 
 ```
 [@(曾宇晟),20260501-20260530:1800] 拆除舊有磁磚
 [@(Larry)@(SA),-20260530] 防水層施工驗收
 ```
+
+`chatBarText` 等 LINE 限制：Rich Menu chatBarText ≤ 14 字元。
