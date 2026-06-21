@@ -1,8 +1,6 @@
 ## Purpose
 定義授權使用者如何透過 LINE 提醒卡片按鈕更新 Trello 工項的完成狀態：以 postback 精準定位工項、限工項 owner 或 supervisor 寫入、寫入後失效掃描快取並留稽核留言；廠商的變更先暫定生效並待主管事後追認或退回。
-
 ## Requirements
-
 ### Requirement: 透過提醒卡片按鈕更新工項完成狀態
 
 提醒（#1–#8）的 Flex 卡片每則工項 SHALL 附「標記完成 / 取消完成」postback 按鈕，`data` 夾帶該工項的 `board_id`、`card_id`、`checkItem_id`（checklist 來源才有）、`source`（card/checklist）與目標 `op`（complete/incomplete）。使用者點按後，系統 SHALL 依該 id 精準定位並執行 Trello 寫入：checklist 工項改 `checkItem.state`、card 層級工項（card desc tag）改 `card.dueComplete`；MUST NOT 移動卡片欄位、MUST NOT 變更日期或標記文字。
@@ -77,12 +75,17 @@
 
 ### Requirement: 廠商變更為暫定並待主管追認
 
-當操作者為工項 owner 但**非** admin/employee（即廠商）時，其完成/取消變更 SHALL **立即在 Trello 生效（暫定）**，同時系統 SHALL 於 `task_confirmations` 建立一筆 `status=pending` 紀錄（記錄目標工項、claim 的目標狀態、操作者、時間），並推播給 supervisor（admin/employee）一則含「確認 / 退回」按鈕的通知。
+當操作者為工項 owner 但**非** admin/employee（即廠商）時，其完成/取消變更 SHALL **立即在 Trello 生效（暫定）**，同時系統 SHALL 於 `task_confirmations` 建立一筆 `status=pending` 紀錄（記錄目標工項、claim 的目標狀態、操作者、時間，以及 claim 當下的**卡片名稱**快照）。系統 **MUST NOT** 於標記當下逐一即時推播主管；該 pending 改由 supervisor 的每日內容（經 on-demand 拉取，見 `daily-notice-on-demand` 與 `notification-daily-summary`）以可操作確認卡呈現。廠商標記後系統 SHALL 回覆廠商「已暫定，將通知主管確認」。
 
 #### Scenario: 廠商標記完成為暫定
 - **WHEN** 廠商（owner 非 supervisor）點按某工項「標記完成」
 - **THEN** 系統立即將該工項在 Trello 設為完成
-- **THEN** 系統建立一筆 pending 追認紀錄，並推播 supervisor 含確認/退回按鈕的通知
+- **THEN** 系統建立一筆 pending 追認紀錄（含卡片名稱快照），並回覆廠商已暫定待主管確認
+
+#### Scenario: 標記當下不即時推播主管
+- **WHEN** 廠商建立一筆 pending 暫定變更
+- **THEN** 系統 MUST NOT 於該當下推播任何主管確認卡片
+- **THEN** 該 pending 於 supervisor 下次拉取每日內容時才呈現
 
 #### Scenario: supervisor 直接標記免追認
 - **WHEN** 操作者 role 為 admin 或 employee 並直接標記某工項完成/取消
@@ -109,3 +112,4 @@ supervisor SHALL 能對 pending 的廠商暫定變更事後**確認**或**退回
 #### Scenario: 重複處理冪等
 - **WHEN** 對已 confirmed 或 rejected 的紀錄再次確認/退回
 - **THEN** 系統不重複動作，回覆該項已處理
+

@@ -33,16 +33,16 @@
 ## 6. 驗證
 
 - [x] 6.0 本機單元驗證 `build_flex`：確認卡優先、cid 按鈕、專案+卡片+label 呈現、空摘要不佔位（py_compile 全通過）
-- [ ] 6.1 廠商標記某工項 → Trello 暫定生效、建立含 card_name 的 pending、**未**即時推主管、廠商收到暫定回覆
-- [ ] 6.2 跑每日 push → 僅 role=vendor 收到；admin/employee/customer 不收
-- [ ] 6.3 主管點 Rich Menu「今日提醒」→ 經 reply 收到摘要＋可操作確認卡（專案名＋卡片名＋label＋標記人＋按鈕），確認不計額度
-- [ ] 6.4 點確認/退回 → 走既有 `cid` 追認/退回（確認定案、退回還原）
-- [ ] 6.5 board_id 非 active → 確認卡顯示後備專案名、卡片照常、不報錯
-- [ ] 6.6 vendor 無內容 → 不 push；任一使用者拉取無內容 → 回「今日無提醒」
+- [x] 6.1 廠商標記某工項 → Trello 暫定生效、建立含 card_name 的 pending、**未**即時推主管、廠商收到暫定回覆（card_name 欄已確認）
+- [x] 6.2 跑每日 push → 僅 role=vendor 收到；admin/employee/customer 不收（dry-run：9 有內容→僅 6 vendor 推）
+- [x] 6.3 主管點 Rich Menu「今日提醒」→ 經 reply 收到摘要＋可操作確認卡（使用者已實機確認）
+- [x] 6.4 點確認/退回 → 走既有 `cid` 追認/退回（handler 未變）
+- [x] 6.5 board_id 非 active → 確認卡顯示後備專案名（「（未登錄專案）」）、卡片照常、不報錯
+- [x] 6.6 vendor 無內容 → 不 push；任一使用者拉取無內容 → 回「今日無提醒」
 - [x] 6.7 ~~核對 `_internal_recipients()` 去重 line_id（3 vs 4 帳號）~~ → moot：使用者已移除多出的 employee
 
 ## 7. 部署（jg-base）
 
-- [~] 7.1 trello-notifier 三 CronJob 收斂為一個（移除 noon/evening schedule）— **已草擬**於 jg-base `cronjobs.yaml`（image 用 `__BUMP_TO_NEW_SHA__` 佔位，未 apply）
-- [ ] 7.2 bump notifier 與 customer-service-agent image，同步所有釘 sha 的檔案（deploy.yaml / admin.yaml / cronjobs.yaml）；部署時跑 `setup_richmenu.py --replace`
-- [ ] 7.3 部署後跑一次每日 push + 各角色拉取驗證
+- [x] 7.1 trello-notifier 三 CronJob 收斂為一個 `trello-notifier-daily`（08:00 Sun–Fri；移除 noon/evening）
+- [x] 7.2 bump image 至 `2b63d3b`（含後續 RBAC/UI 修正），同步 deploy.yaml / admin.yaml / cronjobs.yaml；跑 `setup_richmenu.py --replace`（CJK 標籤）
+- [x] 7.3 部署後驗證：pods 健康、每日 push 僅 vendor、各角色拉取內容正確（含 RBAC 隔離）

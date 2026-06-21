@@ -1,6 +1,5 @@
-## Purpose
-角色與權限模型：定義 admin/employee/vendor/customer/visitor 五種角色及其資料查詢權限邊界。
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Role definitions
 系統 SHALL 支援五種角色，各角色對 Trello 工項的存取權限如下：
 
@@ -29,21 +28,7 @@
 - **THEN** 系統回覆「您目前沒有工程查詢權限，如有需要請聯繫我們的服務人員。」
 - **THEN** 不向 trello-agent 發送 MQTT request
 
-### Requirement: Permission lookup from DB
-系統 SHALL 在處理每則訊息時，從 `line_user_projects` JOIN `projects` 查詢該用戶可存取的 trello_board_id 清單，不得使用 `line_users.projects` JSONB 欄位。
-
-#### Scenario: Permission check via new table
-- **WHEN** customer-service-agent 準備呼叫 query_trello 工具
-- **THEN** 查詢 `SELECT p.trello_board_id FROM line_user_projects lup JOIN projects p ON lup.project_id = p.project_id WHERE lup.line_id = %s AND p.status = 'active'`
-- **THEN** 將 allowed_board_ids 帶入 MQTT request 傳給 trello-agent
-
-#### Scenario: User not in DB
-- **WHEN** line_id 不存在於 `line_users`（極少數情況，建檔失敗）
-- **THEN** 視為 visitor，回傳無權限訊息
-
-#### Scenario: Customer with no assigned projects
-- **WHEN** role=customer 但 line_user_projects 無對應記錄
-- **THEN** allowed_board_ids = []，視為無存取權限
+## ADDED Requirements
 
 ### Requirement: 廠商工項可見性以擁有者為界（跨對話與通知）
 廠商的工項可見性 SHALL 一致地收斂到擁有者層級，套用於兩條路徑：(1) 對話查詢 `query_trello`、(2) 每日通知與 Rich Menu on-demand 拉取。系統 MUST 僅向廠商呈現其被 `[@(alias)]` 指派的工項，MUST NOT 因看板共享而洩漏他人工項或主管專屬內容（每日摘要、待主管確認卡）。系統 MUST NOT 以任何跨帳號鏡像（如舊有「通知 larry 即同步通知 larryoffice」）將某帳號內容複製給另一帳號；跨帳號可見性僅能由各帳號自身角色決定。
@@ -59,4 +44,3 @@
 #### Scenario: 無跨帳號鏡像
 - **WHEN** 任一主管帳號（如 larry）產生通知內容
 - **THEN** 系統 MUST NOT 將其內容鏡像複製給其他帳號（如 larryoffice）；larryoffice 僅依自身 role=vendor 取得自己的工項
-
