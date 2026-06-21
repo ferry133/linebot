@@ -319,6 +319,12 @@ class CustomerServiceAgent:
                 f"- 請以「專案名稱」（非 Trello 看板名稱）辨識與回應。\n"
                 f"- 若過往對話或範例與此衝突，以本段為準。"
             )
+            if role == "vendor":
+                system += (
+                    "\n- 此使用者為廠商：query_trello 只會回傳「他自己負責」的工項。"
+                    "若他問到其他人的工作或整體進度，請說明你只能提供他負責的工項，"
+                    "其餘請洽承辦窗口；切勿臆測或列出非他負責的項目。"
+                )
 
         history = self.memory.get_working(user_id)
         new_messages = [{"role": "user", "content": user_message}]
@@ -442,6 +448,15 @@ class CustomerServiceAgent:
         if allowed_board_ids is not None and len(allowed_board_ids) == 0:
             return "您目前沒有工程查詢權限，如有需要請聯繫我們的服務人員。"
 
+        # 廠商僅能查到自己負責（被 tag）的工項——板層授權之外再加 owner 層過濾，
+        # 避免看到同看板其他負責人的工作。客戶/主管不受 owner 過濾（None）。
+        # owner_alias 為 None=不過濾；字串（含 ""）=只留 names 含該 alias 者。
+        owner_alias = None
+        if user_id:
+            _d, alias, role = self._user_identity(user_id)
+            if role == "vendor":
+                owner_alias = (alias or "").lower()
+
         request_id = str(uuid.uuid4())
         reply_topic = f"{TRELLO_REPLY_PREFIX}/{request_id}"
 
@@ -456,6 +471,7 @@ class CustomerServiceAgent:
             "keyword": keyword,
             "allowed_board_ids": allowed_board_ids,
             "project_map": project_map,
+            "owner_alias": owner_alias,
         })
 
         try:
