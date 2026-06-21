@@ -74,8 +74,9 @@ class TrelloAgent:
 
         allowed_board_ids = payload.get("allowed_board_ids", payload.get("allowed_boards"))  # None=all, []=blocked, [str]=filter by board_id
         project_map = payload.get("project_map") or {}  # {board_id: project_name}
-        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed_ids={allowed_board_ids} projects={len(project_map)}")
-        result = self._query(query_type, keyword, allowed_board_ids, project_map)
+        owner_alias = payload.get("owner_alias")  # None=no owner filter; str (incl "")=only items tagged to this alias (廠商)
+        log.info(f"[{AGENT_ID}] Request {request_id[:8]}: type={query_type} keyword={keyword} allowed_ids={allowed_board_ids} owner={owner_alias} projects={len(project_map)}")
+        result = self._query(query_type, keyword, allowed_board_ids, project_map, owner_alias)
         self.broker.publish(reply_to, {
             "request_id": request_id,
             "result": result,
@@ -136,7 +137,8 @@ class TrelloAgent:
 
     def _query(self, query_type: str, keyword: str = "",
                allowed_board_ids: list[str] | None = None,
-               project_map: dict | None = None) -> str:
+               project_map: dict | None = None,
+               owner_alias: str | None = None) -> str:
         project_map = project_map or {}
         try:
             items = self._scan_all_items()
@@ -148,6 +150,10 @@ class TrelloAgent:
         if allowed_board_ids is not None:
             allowed_set = set(allowed_board_ids)
             items = [i for i in items if i.get("board_id") in allowed_set]
+
+        # 廠商 owner 層過濾：只留 names 含該 alias 的工項（None=不過濾；""=無可對應→空）
+        if owner_alias is not None:
+            items = [i for i in items if owner_alias in [n.lower() for n in i.get("names", [])]]
 
         # Attach project_name (falls back to Trello board name if no mapping)
         for i in items:
