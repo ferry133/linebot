@@ -33,10 +33,10 @@ from agents.base.memory import AgentMemory
 from shared.broker import MQTTBroker
 from shared.db import db_exec
 from trello_line_notifier import (
-    TAIPEI, send_line, send_flex,
+    TAIPEI, send_line,
     get_card, parse_tag,
     set_checkitem_state, set_card_due_complete, add_card_comment,
-    _internal_recipients,
+    build_daily_messages_for_user,
 )
 from shared.guide import guide_messages, GUIDE_KEYWORDS
 
@@ -522,6 +522,24 @@ class CustomerServiceAgent:
             "user_id": user_id, "messages": msgs, "reply_token": reply_token,
         })
 
+    def _handle_daily(self, user_id: str, reply_token: str | None):
+        """Rich Menu「今日提醒」on-demand 拉取：組裝該使用者角色對應的每日內容，
+        經 Reply API 回覆（免費）。supervisor 另含每日摘要與可操作確認卡。
+        無內容時一律回覆「今日無提醒」。"""
+        _display, _alias, role = self._user_identity(user_id)
+        try:
+            msgs = build_daily_messages_for_user(user_id, role)
+        except Exception as e:
+            log.exception(f"[{AGENT_ID}] build daily content failed for {user_id[:8]}: {e}")
+            self._reply(user_id, "目前無法取得今日提醒，請稍後再試。", reply_token)
+            return
+        if not msgs:
+            self._reply(user_id, "今日無提醒。", reply_token)
+            return
+        self.broker.publish(OUTBOX_TOPIC, {
+            "user_id": user_id, "messages": msgs, "reply_token": reply_token,
+        })
+
     def _invalidate_trello_cache(self):
         try:
             self.broker.publish(TRELLO_INVALIDATE_TOPIC, {"ts": datetime.now(TAIPEI).isoformat()})
@@ -571,6 +589,8 @@ class CustomerServiceAgent:
                 self._handle_confirmation(user_id, pb, reply_token)
             elif op == "guide":
                 self._handle_guide(user_id, reply_token, pb)
+            elif op == "daily":
+                self._handle_daily(user_id, reply_token)
             else:
                 self._reply(user_id, "未知動作。", reply_token)
         except Exception as e:
@@ -625,10 +645,9 @@ class CustomerServiceAgent:
         if is_supervisor:
             self._reply(user_id, f"已將「{label}」標記為{act}。", reply_token)
             return
-        # 廠商：暫定生效 + pending + 通知主管
-        cid = self._insert_pending(board_id, card_id, checkitem_id, source, label, op, user_id, alias)
-        if cid is not None:
-            self._notify_supervisors(label, who, act, cid)
+        # 廠商：暫定生效 + pending（主管於每日內容/Rich Menu 拉取時追認，不即時推播）
+        card_name = card.get("name", "")
+        self._insert_pending(board_id, card_id, checkitem_id, source, label, op, user_id, alias, card_name)
         self._reply(user_id, f"已暫定將「{label}」標記為{act}，將通知主管確認。", reply_token)
 
     def _handle_confirmation(self, user_id: str, pb: dict, reply_token: str | None):
@@ -662,14 +681,14 @@ class CustomerServiceAgent:
             add_card_comment(card_id, f"❌ LINE：主管 {display} 於 {now} 退回「{label}」，已還原")
             self._reply(user_id, f"已退回「{label}」並還原狀態。", reply_token)
 
-    def _insert_pending(self, board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias):
+    def _insert_pending(self, board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias, card_name=""):
         def _q(conn):
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO task_confirmations "
-                    "(board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                    (board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias))
+                    "(board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias, card_name) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                    (board_id, card_id, checkitem_id, source, label, target_state, claimer_user_id, claimer_alias, card_name))
                 r = cur.fetchone()
                 return r["id"] if isinstance(r, dict) else r[0]
         try:
@@ -706,33 +725,6 @@ class CustomerServiceAgent:
             return db_exec(_q)
         except Exception:
             return 0
-
-    def _notify_supervisors(self, label, who, act, cid):
-        supervisors = _internal_recipients()
-        flex = self._confirm_flex(label, who, act, cid)
-        for uid in supervisors:
-            if not uid:
-                continue
-            try:
-                send_flex(uid, flex, f"待確認：{label}")
-            except Exception as e:
-                log.warning(f"[{AGENT_ID}] notify supervisor failed: {e}")
-
-    def _confirm_flex(self, label, who, act, cid):
-        return {
-            "type": "bubble", "size": "mega",
-            "header": {"type": "box", "layout": "vertical", "contents": [
-                {"type": "text", "text": "意念情境・待主管確認", "size": "xs", "color": "#AAAAAA"},
-                {"type": "text", "text": f"廠商標記{act}", "weight": "bold", "size": "md", "color": "#EF6C00", "margin": "sm"}]},
-            "body": {"type": "box", "layout": "vertical", "contents": [
-                {"type": "text", "text": label, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True},
-                {"type": "text", "text": f"由 {who} 標記", "size": "xs", "color": "#666666", "wrap": True, "margin": "sm"},
-                {"type": "box", "layout": "horizontal", "margin": "lg", "spacing": "sm", "contents": [
-                    {"type": "button", "style": "primary", "color": "#388E3C", "height": "sm",
-                     "action": {"type": "postback", "label": "✅ 確認", "data": f"o=confirm&cid={cid}", "displayText": "確認"}},
-                    {"type": "button", "style": "secondary", "height": "sm",
-                     "action": {"type": "postback", "label": "❌ 退回", "data": f"o=reject&cid={cid}", "displayText": "退回"}}]}]},
-        }
 
 
 if __name__ == "__main__":

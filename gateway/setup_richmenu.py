@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""一次性腳本：建立含「📖 使用說明」的 LINE Rich Menu 並設為預設。
+"""一次性腳本：建立含「📋 今日提醒」與「📖 使用說明」兩塊的 LINE Rich Menu 並設為預設。
 
-點擊整塊 → postback `o=guide` → gateway 轉 customer-service `_handle_guide`
-→ 依角色回覆專屬手冊連結。
+左半 → postback `o=daily` → customer-service `_handle_daily`（on-demand 拉取每日內容，走 Reply API＝免費）。
+右半 → postback `o=guide` → customer-service `_handle_guide`（依角色回覆專屬手冊連結）。
 
 用法（需 LINE_CHANNEL_ACCESS_TOKEN 環境變數）：
     python gateway/setup_richmenu.py                 # 自動產生底圖
@@ -25,16 +25,24 @@ API = "https://api.line.me/v2/bot"
 API_DATA = "https://api-data.line.me/v2/bot"
 WIDTH, HEIGHT = 2500, 843
 
+HALF = WIDTH // 2
+
 RICHMENU = {
     "size": {"width": WIDTH, "height": HEIGHT},
     "selected": True,
-    "name": "guide-menu",
-    "chatBarText": "📖 使用說明",
+    "name": "main-menu",
+    "chatBarText": "📋 今日提醒 / 📖 使用說明",
     "areas": [
         {
-            "bounds": {"x": 0, "y": 0, "width": WIDTH, "height": HEIGHT},
+            # 左半：今日提醒（on-demand 拉取，走 Reply API＝免費）
+            "bounds": {"x": 0, "y": 0, "width": HALF, "height": HEIGHT},
+            "action": {"type": "postback", "data": "o=daily", "displayText": "今日提醒"},
+        },
+        {
+            # 右半：使用說明
+            "bounds": {"x": HALF, "y": 0, "width": WIDTH - HALF, "height": HEIGHT},
             "action": {"type": "postback", "data": "o=guide", "displayText": "使用說明"},
-        }
+        },
     ],
 }
 
@@ -68,19 +76,24 @@ def _generate_image() -> bytes:
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (WIDTH, HEIGHT), "#06c755")
     d = ImageDraw.Draw(img)
-    f1 = _load_font(210)
+    # 中央分隔線（兩個按鈕區）
+    d.line([(HALF, 90), (HALF, HEIGHT - 90)], fill="#ffffff", width=8)
+    f1 = _load_font(150)
     if f1 is not None:
-        # 有 CJK 字型（如在 macOS 執行）→ 直接畫中文
-        f2 = _load_font(92)
-        for text, font, y in (("📖  使用說明", f1, int(HEIGHT * 0.26)),
-                              ("點此查看你的操作說明", f2, int(HEIGHT * 0.60))):
-            box = d.textbbox((0, 0), text, font=font)
-            d.text(((WIDTH - (box[2] - box[0])) / 2, y), text, fill="#ffffff", font=font)
+        # 有 CJK 字型（如在 macOS 執行）→ 直接畫中文，左右兩欄
+        f2 = _load_font(70)
+        cols = (
+            (HALF // 2,            "📋  今日提醒", "查看今日工程提醒"),
+            (HALF + (WIDTH - HALF) // 2, "📖  使用說明", "查看你的操作說明"),
+        )
+        for cx, title, subtitle in cols:
+            for text, font, y in ((title, f1, int(HEIGHT * 0.28)), (subtitle, f2, int(HEIGHT * 0.62))):
+                box = d.textbbox((0, 0), text, font=font)
+                d.text((cx - (box[2] - box[0]) / 2, y), text, fill="#ffffff", font=font)
     else:
-        # 無字型（slim 容器）→ 乾淨幾何設計，避免中文變方框；文字標籤由 chatBarText 顯示
-        d.rounded_rectangle([110, 110, WIDTH - 110, HEIGHT - 110], radius=70, outline="#ffffff", width=16)
-        d.rounded_rectangle([WIDTH * 0.34, HEIGHT * 0.40, WIDTH * 0.66, HEIGHT * 0.60],
-                            radius=44, fill="#ffffff")
+        # 無字型（slim 容器）→ 幾何設計，避免中文變方框；文字標籤由 chatBarText 顯示
+        for x0 in (HALF // 2, HALF + (WIDTH - HALF) // 2):
+            d.rounded_rectangle([x0 - 130, HEIGHT * 0.40, x0 + 130, HEIGHT * 0.60], radius=44, fill="#ffffff")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
