@@ -31,7 +31,7 @@ RICHMENU = {
     "size": {"width": WIDTH, "height": HEIGHT},
     "selected": True,
     "name": "main-menu",
-    "chatBarText": "📋 今日提醒 / 📖 使用說明",
+    "chatBarText": "📋今日 📖說明",  # LINE 上限 14 字元
     "areas": [
         {
             # 左半：今日提醒（on-demand 拉取，走 Reply API＝免費）
