@@ -7,6 +7,12 @@ WORKDIR /app
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
+# CJK 字型：讓 setup_richmenu.py 自動產生的 Rich Menu 底圖能畫出中文標籤（否則 slim 容器
+# 無字型會落到幾何後備、按鈕無文字）。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY trello_line_notifier.py linebot_server.py gantt_generator.py ./
 COPY migrations/ ./migrations/
 COPY shared/ ./shared/

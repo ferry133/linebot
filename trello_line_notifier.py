@@ -639,19 +639,9 @@ def run_checks():
             seen.add(item)
             unique.append(item)
 
-    # 凡通知 larry，也同步通知 larryoffice
-    larry_ids = _resolve_tag_recipients(["larry"])
-    larryoffice_ids = _resolve_tag_recipients(["larryoffice"])
-    larry_uid = larry_ids[0] if larry_ids else contacts.get("larry")
-    larryoffice_uid = larryoffice_ids[0] if larryoffice_ids else contacts.get("larryoffice")
-    if larry_uid and larryoffice_uid:
-        for uid, bn, it in list(unique):
-            if uid == larry_uid:
-                mirrored = (larryoffice_uid, bn, it)
-                if mirrored not in seen:
-                    seen.add(mirrored)
-                    unique.append(mirrored)
-
+    # 註：舊有「凡通知 larry 也同步通知 larryoffice」鏡像已移除——它會把 larry（主管）的
+    # 全部內部項目與待主管確認卡複製給 larryoffice。larryoffice 現為 vendor，僅應收到自己被
+    # tag 的工項；要看主管內容請改設其 role 為 employee/admin（依角色，不再硬編鏡像）。
     return unique
 
 
@@ -661,18 +651,15 @@ def _postback_data(op, board_id, card_id, checkitem_id, source):
 
 
 def _status_buttons(board_id, card_id, checkitem_id, source):
-    """提醒卡片上的「標記完成 / 取消完成」postback 按鈕列。"""
+    """提醒卡片上的「✅ 完成」postback 按鈕（單顆，精簡）。
+    取消完成（還原）請至 Trello 操作；主管追認的退回另由確認卡處理。"""
     return {
-        "type": "box", "layout": "horizontal", "margin": "md", "spacing": "sm",
+        "type": "box", "layout": "horizontal", "margin": "md",
         "contents": [
             {"type": "button", "style": "primary", "color": "#388E3C", "height": "sm",
-             "action": {"type": "postback", "label": "✅ 標記完成",
+             "action": {"type": "postback", "label": "✅ 完成",
                         "data": _postback_data("complete", board_id, card_id, checkitem_id, source),
                         "displayText": "標記完成"}},
-            {"type": "button", "style": "secondary", "height": "sm",
-             "action": {"type": "postback", "label": "↩︎ 取消完成",
-                        "data": _postback_data("incomplete", board_id, card_id, checkitem_id, source),
-                        "displayText": "取消完成"}},
         ],
     }
 
