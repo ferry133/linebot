@@ -368,11 +368,9 @@ def fmt_item(list_name, card_name, body):
     return f"【{list_name}/{card_name}】\n{body}"
 
 
-def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, mode, internal, is_complete: bool = False,
+def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, internal, is_complete: bool = False,
                board_id="", card_id="", checkitem_id=None, source="card"):
     sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}") or [contacts[n] for n in names if n in contacts]
-    now_time = datetime.now(TAIPEI).time()
-    is_weekday = date.today().weekday() < 5
     sub = f"{list_name}/{card_name}"
     # #3~#6 共用前提：載體未完成（card dueComplete / checklist state）才發送
     # → 打勾完成的工項不再收到到期/逾期通知（#1/#2 開始日不受此限；清單名稱不當抑制）
@@ -385,26 +383,24 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
         for uid in uids:
             notifications.append((uid, board_name, rec))
 
-    if mode == "morning":
-        if start and days_diff(start) == 0:
-            add(sponsors, "今日開始", "#388E3C")
-        if active and end and days_diff(end) == 0:
-            if not (end_time and now_time > end_time):
-                time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
-                add(set(sponsors + internal), f"今日{time_str}到期", "#D32F2F")
-
-    elif mode == "noon":
-        if start and 1 <= days_diff(start) <= 7:
-            add(sponsors, f"{days_diff(start)} 天後開始", "#1976D2")
-        if active and end and 1 <= days_diff(end) <= 7:
-            d = days_diff(end)
-            add(set(sponsors + internal), f"{d} 天內到期", _due_color(d))
-
-    elif mode == "evening":
-        if active and end and days_diff(end) == 0 and end_time and now_time > end_time:
-            add(set(sponsors + internal), f"今日 {end_time.strftime('%H:%M')} 已逾期", "#B71C1C")
-        if active and end and days_diff(end) < 0 and is_weekday:
-            add(set(sponsors + internal), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
+    # 單一每日批次：一次評估全部觸發條件（原 morning/noon/evening 合併）。
+    # #2 今日開始
+    if start and days_diff(start) == 0:
+        add(sponsors, "今日開始", "#388E3C")
+    # #1 開始倒數（1–7 天後）
+    if start and 1 <= days_diff(start) <= 7:
+        add(sponsors, f"{days_diff(start)} 天後開始", "#1976D2")
+    # #4 今日到期（#5「今日時間已過」在清晨每日批次視為惰性，由本條涵蓋）
+    if active and end and days_diff(end) == 0:
+        time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
+        add(set(sponsors + internal), f"今日{time_str}到期", "#D32F2F")
+    # #3 結束倒數（1–7 天內）
+    if active and end and 1 <= days_diff(end) <= 7:
+        d = days_diff(end)
+        add(set(sponsors + internal), f"{d} 天內到期", _due_color(d))
+    # #6 已逾期（所有執行日皆呈現；批次排程 Sun–Fri，週六不跑）
+    if active and end and days_diff(end) < 0:
+        add(set(sponsors + internal), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
 
 
 def _inactive_board_ids() -> set:
@@ -422,20 +418,54 @@ def _inactive_board_ids() -> set:
 
 
 def _pending_confirmations() -> list:
-    """待主管追認的廠商暫定變更（task_confirmations status=pending）。供 #9 摘要呈現給 supervisor。"""
+    """待主管追認的廠商暫定變更（task_confirmations status=pending）。
+    回傳含定位資訊：id(cid)、board_id、card_name、label、target_state、claimer_alias、claimer_display。
+    供主管的每日內容以可操作確認卡呈現。"""
     if _db_exec is None:
         return []
     def _q(conn):
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT label, claimer_alias, target_state, claimed_at "
-                "FROM task_confirmations WHERE status = 'pending' ORDER BY claimed_at"
+                "SELECT tc.id, tc.board_id, tc.card_name, tc.label, tc.target_state, "
+                "tc.claimer_alias, lu.display_name AS claimer_display "
+                "FROM task_confirmations tc "
+                "LEFT JOIN line_users lu ON lu.line_id = tc.claimer_user_id "
+                "WHERE tc.status = 'pending' ORDER BY tc.claimed_at"
             )
             return cur.fetchall()
     return _db_exec(_q) or []
 
 
-def run_checks(mode):
+def _all_project_names() -> dict:
+    """{board_id: project_name} for all projects with a Trello board (含已完成/封存，
+    供確認卡定位；查無時由呼叫端以後備值呈現）。"""
+    if _db_exec is None:
+        return {}
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT trello_board_id, name FROM projects WHERE trello_board_id IS NOT NULL"
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    return _db_exec(_q) or {}
+
+
+def _roles_by_lineid(uids: list[str]) -> dict:
+    """{line_id: role} for the given LINE ids — used to限定主動 push 僅送 vendor。"""
+    if not uids or _db_exec is None:
+        return {}
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT line_id, role FROM line_users WHERE line_id = ANY(%s)", (uids,)
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    return _db_exec(_q) or {}
+
+
+def run_checks():
+    """單一每日批次：一次評估全部觸發條件（#1–#9），回傳 (uid, board_name, rec) 清單。
+    主管(internal)額外得每日摘要與可操作確認卡。交付（push 過濾 / on-demand 拉取）由呼叫端決定。"""
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
     contacts = load_contacts()
@@ -468,9 +498,9 @@ def run_checks(mode):
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, mode, internal, is_complete=is_complete,
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, internal, is_complete=is_complete,
                                board_id=board["id"], card_id=card["id"], checkitem_id=None, source="card")
-                    if mode == "morning" and _in_summary(start, end, is_complete):
+                    if _in_summary(start, end, is_complete):
                         summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 
             for checklist in card.get("checklists", []):
@@ -486,102 +516,120 @@ def run_checks(mode):
                     if not is_complete:
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, mode, internal, is_complete=is_complete,
+                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, internal, is_complete=is_complete,
                                board_id=board["id"], card_id=card["id"], checkitem_id=item["id"], source="checklist")
-                    if mode == "morning" and _in_summary(start, end, is_complete):
+                    if _in_summary(start, end, is_complete):
                         summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
 
                 if not has_tag:
                     continue
 
-                if mode == "noon":
-                    last_activity = card.get("dateLastActivity")
-                    if last_activity:
-                        last_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
-                        days_stale = (datetime.now(TAIPEI) - last_dt.astimezone(TAIPEI)).days
-                        incomplete = [i for i in items if i["state"] == "incomplete"]
-                        if incomplete and days_stale >= 3:
-                            rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "", "", "", None, "card")
-                            for uid in internal:
-                                if uid:
-                                    notifications.append((uid, board_name, rec))
+                # #7 停滯（內部）
+                last_activity = card.get("dateLastActivity")
+                if last_activity:
+                    last_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+                    days_stale = (datetime.now(TAIPEI) - last_dt.astimezone(TAIPEI)).days
+                    incomplete = [i for i in items if i["state"] == "incomplete"]
+                    if incomplete and days_stale >= 3:
+                        rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "", "", "", None, "card")
+                        for uid in internal:
+                            if uid:
+                                notifications.append((uid, board_name, rec))
 
-                    if items and all(i["state"] == "complete" for i in items):
-                        for item in items:
-                            parsed = parse_tag(item["name"])
-                            if parsed:
-                                names, _, _, _, _ = parsed
-                                sponsors = [contacts[n] for n in names if n in contacts]
-                                rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card")
-                                for uid in sponsors:
-                                    notifications.append((uid, board_name, rec))
-                                break
+                # #8 全部完成
+                if items and all(i["state"] == "complete" for i in items):
+                    for item in items:
+                        parsed = parse_tag(item["name"])
+                        if parsed:
+                            names, _, _, _, _ = parsed
+                            sponsors = [contacts[n] for n in names if n in contacts]
+                            rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card")
+                            for uid in sponsors:
+                                notifications.append((uid, board_name, rec))
+                            break
 
             # 完成但未歸欄：整張卡所有檢查項皆完成、卻不在「已完成」欄 → minor 警告（morning render）
             if card_has_check and card_all_complete and "已完成" not in list_name:
                 _complete_unfiled.append(f"{board_name}/{card['name']}")
 
-    # #9 每日摘要（morning only）— 結構化資料，由 build_flex 以與專案提醒同款的 bubble 呈現
-    if mode == "morning":
-        now_str = datetime.now(TAIPEI).strftime("%Y/%m/%d")
-        # 巢狀結構：board → 狀態欄(list_name) → 卡片 → [工項]；收斂同卡重複、同工項去重
-        from collections import OrderedDict
-        tree = OrderedDict()
-        for board, lst, card, label, overdue in summary_items:
-            cards = tree.setdefault(board, OrderedDict()).setdefault(lst, OrderedDict())
-            labels = cards.setdefault(card, [])
-            entry = (label, overdue)
-            if entry not in labels:
-                labels.append(entry)
+    # #9 每日摘要（內部）— 結構化資料，由 build_flex 以與專案提醒同款的 bubble 呈現
+    now_str = datetime.now(TAIPEI).strftime("%Y/%m/%d")
+    # 巢狀結構：board → 狀態欄(list_name) → 卡片 → [工項]；收斂同卡重複、同工項去重
+    from collections import OrderedDict
+    tree = OrderedDict()
+    for board, lst, card, label, overdue in summary_items:
+        cards = tree.setdefault(board, OrderedDict()).setdefault(lst, OrderedDict())
+        labels = cards.setdefault(card, [])
+        entry = (label, overdue)
+        if entry not in labels:
+            labels.append(entry)
 
-        def _status_rank(lst):
-            if "已完成" in lst: return 2
-            if "執行中" in lst: return 1
-            if "未執行" in lst: return 0
-            return 3
+    def _status_rank(lst):
+        if "已完成" in lst: return 2
+        if "執行中" in lst: return 1
+        if "未執行" in lst: return 0
+        return 3
 
-        sections = tuple(
-            (
-                board,
-                tuple(
-                    (lst, tuple((card, tuple(labels)) for card, labels in cards.items()))
-                    for lst, cards in sorted(cols.items(), key=lambda kv: (_status_rank(kv[0]), kv[0]))
-                ),
-            )
-            for board, cols in tree.items()
+    sections = tuple(
+        (
+            board,
+            tuple(
+                (lst, tuple((card, tuple(labels)) for card, labels in cards.items()))
+                for lst, cards in sorted(cols.items(), key=lambda kv: (_status_rank(kv[0]), kv[0]))
+            ),
         )
-        # warnings: ((標題, (行,...)),...)，各自一張 bubble（用 tuple 以保持 rec 可 hash 供去重）
-        warnings = []
-        if _unresolved_aliases:
-            wlines = []
-            for name in sorted(_unresolved_aliases):
-                srcs = sorted(_unresolved_aliases[name])
-                if srcs:
-                    shown = "、".join(srcs[:3])
-                    if len(srcs) > 3:
-                        shown += f"…等 {len(srcs)} 處"
-                    wlines.append(f"・{name}（{shown}）")
-                else:
-                    wlines.append(f"・{name}")
-            warnings.append(("⚠️ 查無對應 LINE 帳號（未發送通知）", tuple(wlines)))
-        if _complete_unfiled:
-            warnings.append(("✅ 已完成但未歸『已完成』欄（請移動卡片）", tuple(f"・{s}" for s in _complete_unfiled)))
-        pending = _pending_confirmations()
-        if pending:
-            plines = []
-            for row in pending:
-                label = row["label"] if isinstance(row, dict) else row[0]
-                alias = (row["claimer_alias"] if isinstance(row, dict) else row[1]) or "?"
-                tstate = row["target_state"] if isinstance(row, dict) else row[2]
-                claimed = row["claimed_at"] if isinstance(row, dict) else row[3]
-                act = "完成" if tstate == "complete" else "取消完成"
-                when = claimed.astimezone(TAIPEI).strftime("%m/%d %H:%M") if claimed else ""
-                plines.append(f"・{label}（{alias} 標記{act} {when}）")
-            warnings.append(("⏳ 待主管確認（廠商暫定變更）", tuple(plines)))
-        summary_rec = ("summary", now_str, sections, tuple(warnings))
+        for board, cols in tree.items()
+    )
+    # warnings: ((標題, (行,...)),...)，各自一張 bubble（用 tuple 以保持 rec 可 hash 供去重）
+    warnings = []
+    if _unresolved_aliases:
+        wlines = []
+        for name in sorted(_unresolved_aliases):
+            srcs = sorted(_unresolved_aliases[name])
+            if srcs:
+                shown = "、".join(srcs[:3])
+                if len(srcs) > 3:
+                    shown += f"…等 {len(srcs)} 處"
+                wlines.append(f"・{name}（{shown}）")
+            else:
+                wlines.append(f"・{name}")
+        warnings.append(("⚠️ 查無對應 LINE 帳號（未發送通知）", tuple(wlines)))
+    if _complete_unfiled:
+        warnings.append(("✅ 已完成但未歸『已完成』欄（請移動卡片）", tuple(f"・{s}" for s in _complete_unfiled)))
+    summary_rec = ("summary", now_str, sections, tuple(warnings))
+    # 摘要僅在有實際內容時附給內部（空摘要不佔 bubble；無內容主管→拉取時回「今日無提醒」）
+    has_summary = bool(sections or warnings)
+    for uid in internal:
+        if not uid:
+            continue
+        if has_summary:
+            notifications.append((uid, "__summary__", summary_rec))
+
+    # 待主管確認 → 每筆一張可操作確認卡（取代舊摘要內的純文字清單）。
+    # rec = ("confirm", cid, 專案名, 卡片名, label, who, act)
+    pending = _pending_confirmations()
+    if pending and internal:
+        proj_map = _all_project_names()
+        confirm_recs = []
+        for row in pending:
+            if isinstance(row, dict):
+                cid, board_id, card_name = row["id"], row["board_id"], row.get("card_name")
+                label = row["label"]; tstate = row["target_state"]
+                alias = row.get("claimer_alias"); cdisplay = row.get("claimer_display")
+            else:
+                cid, board_id, card_name, label, tstate, alias, cdisplay = row
+            project = proj_map.get(board_id) or "（未登錄專案）"
+            act = "完成" if tstate == "complete" else "取消完成"
+            if cdisplay and alias:
+                who = f"{cdisplay}（{alias}）"
+            else:
+                who = cdisplay or alias or "廠商"
+            confirm_recs.append(("confirm", cid, project, card_name or "", label, who, act))
         for uid in internal:
-            if uid:
-                notifications.append((uid, "__summary__", summary_rec))
+            if not uid:
+                continue
+            for rec in confirm_recs:
+                notifications.append((uid, "__confirm__", rec))
 
     # 去除重複通知
     seen = set()
@@ -629,23 +677,55 @@ def _status_buttons(board_id, card_id, checkitem_id, source):
     }
 
 
+def _confirm_bubble(rec):
+    """待主管確認的可操作卡片：專案名＋卡片名＋label＋標記人＋確認/退回按鈕。
+    rec = ("confirm", cid, 專案名, 卡片名, label, who, act)。"""
+    _, cid, project, card_name, label, who, act = rec
+    body = [{"type": "text", "text": project or "（未登錄專案）", "size": "xs", "color": "#1976D2", "wrap": True}]
+    if card_name:
+        body.append({"type": "text", "text": card_name, "size": "sm", "color": "#666666", "wrap": True, "margin": "xs"})
+    body += [
+        {"type": "separator", "margin": "md"},
+        {"type": "text", "text": label, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True, "margin": "md"},
+        {"type": "text", "text": f"由 {who} 標記{act}", "size": "xs", "color": "#666666", "wrap": True, "margin": "sm"},
+        {"type": "box", "layout": "horizontal", "margin": "lg", "spacing": "sm", "contents": [
+            {"type": "button", "style": "primary", "color": "#388E3C", "height": "sm",
+             "action": {"type": "postback", "label": "✅ 確認", "data": f"o=confirm&cid={cid}", "displayText": "確認"}},
+            {"type": "button", "style": "secondary", "height": "sm",
+             "action": {"type": "postback", "label": "↩︎ 退回", "data": f"o=reject&cid={cid}", "displayText": "退回"}},
+        ]},
+    ]
+    return {
+        "type": "bubble", "size": "mega",
+        "header": {"type": "box", "layout": "vertical", "contents": [
+            {"type": "text", "text": "意念情境・待主管確認", "size": "xs", "color": "#AAAAAA"},
+            {"type": "text", "text": f"廠商標記{act}", "weight": "bold", "size": "md", "color": "#EF6C00", "margin": "sm"}]},
+        "body": {"type": "box", "layout": "vertical", "contents": body},
+    }
+
+
 def build_flex(items, mode_label):
     """將同一收件人的 (board_name, rec) 清單組成 LINE Flex 訊息 contents。
-    rec = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source) 或 ("summary", …)。
-    每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag，附完成/取消按鈕。"""
+    rec = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source)、("summary", …) 或 ("confirm", …)。
+    確認卡優先；每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag，附完成/取消按鈕。"""
     board_order = []
     by_board = {}
     summaries = []
+    confirms = []
     for board_name, rec in items:
         if rec[0] == "summary":
             summaries.append(rec)
+            continue
+        if rec[0] == "confirm":
+            confirms.append(rec)
             continue
         by_board.setdefault(board_name, [])
         if board_name not in board_order:
             board_order.append(board_name)
         by_board[board_name].append(rec)
 
-    bubbles = []
+    # 確認卡優先排在最前，避免 12 bubble 上限截斷時被丟棄
+    bubbles = [_confirm_bubble(rec) for rec in confirms]
     for board in board_order:
         body = []
         for i, rec in enumerate(by_board[board]):
@@ -693,9 +773,7 @@ def build_flex(items, mode_label):
 
     for rec in summaries:
         _, now_str, sections, warnings = rec
-        if not sections and not warnings:
-            bubbles.append(_summary_bubble(now_str, "今日無進行中工項", [
-                {"type": "text", "text": "目前沒有帶標記的工項", "size": "sm", "color": "#999999", "wrap": True}]))
+        # 空摘要不佔位（無內容主管於拉取時由上層回「今日無提醒」）
         # 每看板一張 bubble：依狀態欄分組（彩色欄頭 + 分隔線），卡片名一次、工項列其下
         for board, columns in sections:
             body = []
@@ -747,26 +825,57 @@ def test_send():
         print(f"→ {name} ({uid[:8]}...)  狀態:{status}")
 
 
+DAILY_LABEL = "今日"
+
+
+def build_daily_messages_for_user(user_id, role=None):
+    """組裝某使用者的每日內容（on-demand 拉取共用）。回傳 LINE message 物件陣列，
+    無內容回 []。內容定義與每日批次一致：跑 run_checks() 後過濾出該 uid 的項目；
+    主管(internal) 因 run_checks 已附其摘要與確認卡，過濾後即包含。"""
+    notifications = run_checks()
+    items = [(board_name, rec) for uid, board_name, rec in notifications if uid == user_id]
+    if not items:
+        return []
+    contents = build_flex(items, DAILY_LABEL)
+    alt = f"意念情境 {DAILY_LABEL}提醒（{len(items)} 則）"
+    return [{"type": "flex", "altText": alt[:400], "contents": contents}]
+
+
+def run_daily_push():
+    """單一每日批次的主動 push：僅送 role=vendor 的收件人；空內容不送。
+    主管/客戶不 push，改由 Rich Menu on-demand 拉取（免費 Reply API）取得。"""
+    notifications = run_checks()
+    grouped = {}
+    for uid, board_name, rec in notifications:
+        grouped.setdefault(uid, []).append((board_name, rec))
+    roles = _roles_by_lineid(list(grouped.keys()))
+    sent = 0
+    for uid, items in grouped.items():
+        if roles.get(uid) != "vendor":   # 僅廠商收主動 push
+            continue
+        if not items:                    # skip-empty
+            continue
+        contents = build_flex(items, DAILY_LABEL)
+        alt = f"意念情境 {DAILY_LABEL}提醒（{len(items)} 則）"
+        status, resp = send_flex(uid, contents, alt)
+        sent += 1
+        print(f"→ {uid[:8]}... 狀態:{status}")
+    print(f"[daily] pushed to {sent} vendor(s)")
+
+
 def main():
     import sys
     args = sys.argv[1:]
     if args and args[0] == "test":
         test_send()
-    elif args and args[0] in ("morning", "noon", "evening"):
-        mode = args[0]
-        mode_label = {"morning": "早上", "noon": "中午", "evening": "下午"}[mode]
-        notifications = run_checks(mode)
-        grouped = {}
-        for uid, board_name, rec in notifications:
-            grouped.setdefault(uid, []).append((board_name, rec))
-        print(f"[{mode}] 共 {len(grouped)} 位收件人")
-        for uid, items in grouped.items():
-            contents = build_flex(items, mode_label)
-            alt = f"意念情境 {mode_label}專案提醒（{len(items)} 則）"
-            status, resp = send_flex(uid, contents, alt)
-            print(f"→ {uid[:8]}... 狀態:{status}")
+    elif args and args[0] in ("noon", "evening"):
+        # 已合併為單一每日批次；保留參數相容但不送，避免舊 CronJob 殘留造成重複推播。
+        print(f"[{args[0]}] deprecated: consolidated into single daily run; nothing sent.")
+    elif not args or args[0] in ("daily", "morning"):
+        # 'morning' 視為 'daily' 別名，方便沿用既有排程命名。
+        run_daily_push()
     else:
-        print("用法：python3 trello_line_notifier.py [morning|noon|evening|test]")
+        print("用法：python3 trello_line_notifier.py [daily|test]")
 
 
 if __name__ == "__main__":
