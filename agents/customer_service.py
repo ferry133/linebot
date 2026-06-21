@@ -309,7 +309,21 @@ class CustomerServiceAgent:
         if memory_context:
             system += f"\n\n{memory_context}"
         role, user_projects = _get_user_role_and_projects(user_id)
-        if user_projects:
+        if role == "vendor":
+            # 廠商：以「自己被指派的工項」為界。不列出專案清單、不提整體進度，避免洩漏與他無關的案子/他人工作。
+            system += (
+                "\n\n## 此使用者身分（系統已確認，請勿再詢問他是誰）\n"
+                "此使用者為**廠商／工班**。query_trello 只會回傳「他自己被指派」的工項。\n"
+                "- 當他說「我／我這邊／我有哪些工作」時，僅指他自己被指派的工項。\n"
+                "- 只就 query_trello 回傳的『他自己工項』作答。MUST NOT 提及、列出或主動提議查詢"
+                "其他案子、其他人的工作或整體進度；MUST NOT 列出與他無關的專案名稱。\n"
+                "- 若查詢結果為空，就說目前沒有指派給他的待辦，請他有需要再洽承辦窗口；"
+                "不要因此去找別的案子或提議查看全貌。\n"
+                "- 若他要求看其他案子／整體進度／他人工項，一律婉拒並請洽承辦窗口；"
+                "MUST NOT 請他報身分或角色以換取更多權限。\n"
+                "- 切勿反問他是誰、不要他報名字或案場；以「專案名稱」（非 Trello 看板名稱）回應。"
+            )
+        elif user_projects:
             names = "、".join(p["name"] for p in user_projects)
             system += (
                 f"\n\n## 此使用者身分與專案（系統已確認，請勿再詢問他是誰）\n"
@@ -319,12 +333,6 @@ class CustomerServiceAgent:
                 f"- 請以「專案名稱」（非 Trello 看板名稱）辨識與回應。\n"
                 f"- 若過往對話或範例與此衝突，以本段為準。"
             )
-            if role == "vendor":
-                system += (
-                    "\n- 此使用者為廠商：query_trello 只會回傳「他自己負責」的工項。"
-                    "若他問到其他人的工作或整體進度，請說明你只能提供他負責的工項，"
-                    "其餘請洽承辦窗口；切勿臆測或列出非他負責的項目。"
-                )
 
         history = self.memory.get_working(user_id)
         new_messages = [{"role": "user", "content": user_message}]
