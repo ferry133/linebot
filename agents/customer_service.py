@@ -447,7 +447,12 @@ class CustomerServiceAgent:
         if role in ("admin", "employee"):
             all_projects = _all_active_projects()
             return None, {**all_projects, **proj_map}
-        if role in ("vendor", "customer"):
+        if role == "vendor":
+            # 廠商可見性僅以工項標記 [@(alias)] 為準（由呼叫端帶 owner_alias 過濾），
+            # 不以看板指派限制——被 tag 即可見、未被 tag 即不可見，與專案指派無關。
+            # 板層不設限（None），全專案名稱供標示其被指派工項的所屬專案。
+            return None, _all_active_projects()
+        if role == "customer":
             return [p["board_id"] for p in projects], proj_map
         return [], {}
 
