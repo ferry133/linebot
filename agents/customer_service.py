@@ -49,6 +49,12 @@ TRELLO_REQUEST_TOPIC = "agents/trello/requests"
 TRELLO_REPLY_PREFIX = "agents/trello/responses"
 TRELLO_TIMEOUT = 30  # 秒
 
+# 文字備援關鍵字 → 走 Rich Menu o=daily 同一份每日 Flex（避免落入 Claude 產生 markdown 文字）
+DAILY_KEYWORDS = {
+    "今日提醒", "今天提醒", "今日工程提醒", "今天工程提醒",
+    "今日專案提醒", "今天專案提醒",
+}
+
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
 MAX_TOKENS = 2048
@@ -248,6 +254,11 @@ class CustomerServiceAgent:
         if text.strip() in GUIDE_KEYWORDS:
             log.info(f"[{AGENT_ID}] Guide keyword from {user_id[:8]}")
             threading.Thread(target=self._handle_guide, args=(user_id, reply_token), daemon=True).start()
+            return
+        # 關鍵字「今日提醒」備援入口 → 與 Rich Menu o=daily 同一份 Flex 內容（非走 Claude 文字）
+        if text.strip() in DAILY_KEYWORDS:
+            log.info(f"[{AGENT_ID}] Daily keyword from {user_id[:8]}")
+            threading.Thread(target=self._handle_daily, args=(user_id, reply_token), daemon=True).start()
             return
         log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
