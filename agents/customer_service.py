@@ -38,6 +38,7 @@ from trello_line_notifier import (
     set_checkitem_state, set_card_due_complete, add_card_comment,
     build_daily_messages_for_user,
     public_label,
+    invalidate_scan_cache,
 )
 from shared.guide import guide_messages, GUIDE_KEYWORDS
 
@@ -583,6 +584,12 @@ class CustomerServiceAgent:
         })
 
     def _invalidate_trello_cache(self):
+        # 清 trello-agent 的掃描快取（MQTT），並清本 process 內 notifier 的掃描快取
+        # （on-demand 今日提醒走 run_checks，寫入後須立即反映新狀態）。
+        try:
+            invalidate_scan_cache()
+        except Exception:
+            pass
         try:
             self.broker.publish(TRELLO_INVALIDATE_TOPIC, {"ts": datetime.now(TAIPEI).isoformat()})
         except Exception:
