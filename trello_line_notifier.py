@@ -436,17 +436,28 @@ def _pending_confirmations() -> list:
     return _db_exec(_q) or []
 
 
+def public_label(site_name, project_type, case_number=None) -> str:
+    """對外（LINE 顯示）專案標籤：`{site_name}-{project_type}`，**不含屋主名**。
+    缺 site_name/project_type（legacy）時退回 case_number；皆無則「（未登錄專案）」。
+    MUST NOT 回退為 projects.name 或 Trello 看板原名（兩者含 PII）。"""
+    site = (site_name or "").strip()
+    ptype = (project_type or "").strip()
+    if site and ptype:
+        return f"{site}-{ptype}"
+    return (case_number or "").strip() or "（未登錄專案）"
+
+
 def _all_project_names() -> dict:
-    """{board_id: project_name} for all projects with a Trello board (含已完成/封存，
-    供確認卡定位；查無時由呼叫端以後備值呈現）。"""
+    """{board_id: public_label}（對外去 PII 標籤；含已完成/封存）。供通知/確認卡/查詢顯示。"""
     if _db_exec is None:
         return {}
     def _q(conn):
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT trello_board_id, name FROM projects WHERE trello_board_id IS NOT NULL"
+                "SELECT trello_board_id, site_name, project_type, case_number "
+                "FROM projects WHERE trello_board_id IS NOT NULL"
             )
-            return {row[0]: row[1] for row in cur.fetchall()}
+            return {row[0]: public_label(row[1], row[2], row[3]) for row in cur.fetchall()}
     return _db_exec(_q) or {}
 
 
@@ -472,6 +483,7 @@ def run_checks():
     internal = _internal_recipients()  # 所有管理者/員工 — #3–#7、#9 內部收件人
     boards = get_boards()
     skip_ids = _inactive_board_ids()
+    label_map = _all_project_names()   # {board_id: 對外 public_label}（去 PII）
     notifications = []
     summary_items = []
 
@@ -479,7 +491,8 @@ def run_checks():
         if board["id"] in skip_ids:
             print(f"[notifier] skip non-active project board: {board.get('name')}")
             continue
-        board_name = board["name"]
+        # 對外顯示一律用 public_label，不顯示 Trello 看板原名（含屋主名）
+        board_name = label_map.get(board["id"]) or "（未登錄專案）"
         list_map = get_lists(board["id"])
         cards = get_cards(board["id"])
         for card in cards:
@@ -609,7 +622,7 @@ def run_checks():
     # rec = ("confirm", cid, 專案名, 卡片名, label, who, act)
     pending = _pending_confirmations()
     if pending and internal:
-        proj_map = _all_project_names()
+        proj_map = label_map   # 對外 public_label（去 PII）
         confirm_recs = []
         for row in pending:
             if isinstance(row, dict):

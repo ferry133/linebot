@@ -37,6 +37,7 @@ from trello_line_notifier import (
     get_card, parse_tag,
     set_checkitem_state, set_card_due_complete, add_card_comment,
     build_daily_messages_for_user,
+    public_label,
 )
 from shared.guide import guide_messages, GUIDE_KEYWORDS
 
@@ -89,14 +90,14 @@ def _load_project_photos() -> dict:
 
 
 def _all_active_projects() -> dict:
-    """Returns {board_id: project_name} for all active projects with a Trello board."""
+    """Returns {board_id: public_label}（去 PII）for all active projects with a Trello board."""
     def _q(conn):
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT trello_board_id, name FROM projects "
+                "SELECT trello_board_id, site_name, project_type, case_number FROM projects "
                 "WHERE trello_board_id IS NOT NULL AND status = 'active'"
             )
-            return {r[0]: r[1] for r in cur.fetchall()}
+            return {r[0]: public_label(r[1], r[2], r[3]) for r in cur.fetchall()}
     try:
         return db_exec(_q) or {}
     except Exception:
@@ -113,12 +114,13 @@ def _get_user_role_and_projects(user_id: str) -> tuple:
                 return None, []
             role = row[0]
             cur.execute(
-                "SELECT p.name, p.trello_board_id FROM line_user_projects lup "
+                "SELECT p.site_name, p.project_type, p.case_number, p.trello_board_id FROM line_user_projects lup "
                 "JOIN projects p ON p.project_id = lup.project_id "
                 "WHERE lup.line_id = %s AND p.trello_board_id IS NOT NULL AND p.status = 'active'",
                 (user_id,),
             )
-            projects = [{"name": r[0], "board_id": r[1]} for r in cur.fetchall()]
+            # name 欄位改放對外 public_label（去 PII）；供 project_map 與系統提示顯示
+            projects = [{"name": public_label(r[0], r[1], r[2]), "board_id": r[3]} for r in cur.fetchall()]
             return role, projects
 
     try:

@@ -155,9 +155,10 @@ class TrelloAgent:
         if owner_alias is not None:
             items = [i for i in items if owner_alias in [n.lower() for n in i.get("names", [])]]
 
-        # Attach project_name (falls back to Trello board name if no mapping)
+        # Attach project_name = 對外 public_label（去 PII）。查無對照時 MUST NOT 回退 Trello
+        # 看板原名（含屋主名）；改顯示「（未登錄專案）」。
         for i in items:
-            i["project_name"] = project_map.get(i.get("board_id"), i["board"])
+            i["project_name"] = project_map.get(i.get("board_id")) or "（未登錄專案）"
 
         if not items:
             return "目前 Trello 無任何有標記的工項。"

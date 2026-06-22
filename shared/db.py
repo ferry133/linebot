@@ -40,6 +40,7 @@ MIGRATIONS = [
     "010_sites.sql",
     "011_task_confirmations.sql",
     "012_task_confirmation_card_name.sql",
+    "013_unique_site_type_active.sql",
 ]
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).parent.parent / "migrations"
