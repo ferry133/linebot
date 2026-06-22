@@ -376,10 +376,10 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
     # → 打勾完成的工項不再收到到期/逾期通知（#1/#2 開始日不受此限；清單名稱不當抑制）
     active = not is_complete
 
-    # 一筆通知 = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source)
-    # 後四欄供提醒卡片的「標記完成/取消」postback 按鈕定位目標工項。
+    # 一筆通知 = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source, label)
+    # rec[5:9] 供提醒卡片的 postback 按鈕定位；rec[9]=label 供與摘要下段去重。
     def add(uids, headline, color):
-        rec = ("item", color, headline, sub, raw, board_id, card_id, checkitem_id, source)
+        rec = ("item", color, headline, sub, raw, board_id, card_id, checkitem_id, source, label)
         for uid in uids:
             notifications.append((uid, board_name, rec))
 
@@ -544,7 +544,7 @@ def run_checks():
                     days_stale = (datetime.now(TAIPEI) - last_dt.astimezone(TAIPEI)).days
                     incomplete = [i for i in items if i["state"] == "incomplete"]
                     if incomplete and days_stale >= 3:
-                        rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "", "", "", None, "card")
+                        rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "", "", "", None, "card", "")
                         for uid in internal:
                             if uid:
                                 notifications.append((uid, board_name, rec))
@@ -556,7 +556,7 @@ def run_checks():
                         if parsed:
                             names, _, _, _, _ = parsed
                             sponsors = [contacts[n] for n in names if n in contacts]
-                            rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card")
+                            rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card", "")
                             for uid in sponsors:
                                 notifications.append((uid, board_name, rec))
                             break
@@ -724,14 +724,46 @@ def build_flex(items, mode_label):
             board_order.append(board_name)
         by_board[board_name].append(rec)
 
+    def _status_color(lst):
+        if "已完成" in lst: return "#388E3C"   # 綠
+        if "執行中" in lst: return "#EF6C00"   # 橙
+        if "未執行" in lst: return "#1976D2"   # 藍
+        return "#666666"
+
+    def _summary_bubble(now_str, title, body, title_color="#1A1A1A"):
+        return {
+            "type": "bubble", "size": "mega",
+            "header": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": f"意念情境・每日工程摘要 {now_str}", "size": "xs", "color": "#AAAAAA"},
+                {"type": "text", "text": title, "weight": "bold", "size": "md", "wrap": True, "color": title_color, "margin": "sm"},
+            ]},
+            "body": {"type": "box", "layout": "vertical", "contents": body},
+        }
+
+    # 摘要解析為 per-board 欄樹 + 警告（方案C：併入各看板，不再獨立摘要 bubble）
+    summary_now, summary_by_board, all_warnings = "", {}, []
+    for rec in summaries:
+        _, summary_now, sections, warnings = rec
+        for b, columns in sections:
+            summary_by_board[b] = columns
+        all_warnings.extend(warnings)
+
+    # 看板宇集：先有提醒的看板，再純摘要看板
+    board_universe = list(board_order) + [b for b in summary_by_board if b not in by_board]
+
     # 確認卡優先排在最前，避免 12 bubble 上限截斷時被丟棄
     bubbles = [_confirm_bubble(rec) for rec in confirms]
-    for board in board_order:
+    for board in board_universe:
         body = []
-        for i, rec in enumerate(by_board[board]):
+        upper_labels = set()   # (card_name, label) 已在上段者，供下段去重
+        # 上段：#1–#8 急迫/可操作工項（含 ✅完成 按鈕）
+        for i, rec in enumerate(by_board.get(board, [])):
             color, headline, sub, raw = rec[1], rec[2], rec[3], rec[4]
             board_id, card_id, checkitem_id, source = (
                 (rec[5], rec[6], rec[7], rec[8]) if len(rec) >= 9 else ("", "", None, "card"))
+            lbl = rec[9] if len(rec) >= 10 else ""
+            if lbl:
+                upper_labels.add((sub.rsplit("/", 1)[-1], lbl))
             block = [
                 {"type": "text", "text": headline, "weight": "bold", "color": color, "size": "md", "wrap": True},
                 {"type": "text", "text": sub, "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
@@ -745,65 +777,59 @@ def build_flex(items, mode_label):
                 body.append({"type": "separator", "margin": "lg"})
                 box["margin"] = "lg"
             body.append(box)
-        bubbles.append({
-            "type": "bubble", "size": "mega",
-            "header": {"type": "box", "layout": "vertical", "contents": [
-                {"type": "text", "text": f"意念情境・{mode_label}專案提醒", "size": "xs", "color": "#AAAAAA"},
-                {"type": "text", "text": board, "weight": "bold", "size": "md", "wrap": True, "color": "#1A1A1A", "margin": "sm"},
-            ]},
-            "body": {"type": "box", "layout": "vertical", "contents": body},
-        })
 
-    def _summary_bubble(now_str, title, body, title_color="#1A1A1A"):
-        # 與專案提醒同款 header：灰色副標 + 粗體標題
-        return {
-            "type": "bubble", "size": "mega",
-            "header": {"type": "box", "layout": "vertical", "contents": [
-                {"type": "text", "text": f"意念情境・每日工程摘要 {now_str}", "size": "xs", "color": "#AAAAAA"},
-                {"type": "text", "text": title, "weight": "bold", "size": "md", "wrap": True, "color": title_color, "margin": "sm"},
-            ]},
-            "body": {"type": "box", "layout": "vertical", "contents": body},
-        }
-
-    def _status_color(lst):
-        if "已完成" in lst: return "#388E3C"   # 綠
-        if "執行中" in lst: return "#EF6C00"   # 橙
-        if "未執行" in lst: return "#1976D2"   # 藍
-        return "#666666"
-
-    for rec in summaries:
-        _, now_str, sections, warnings = rec
-        # 空摘要不佔位（無內容主管於拉取時由上層回「今日無提醒」）
-        # 每看板一張 bubble：依狀態欄分組（彩色欄頭 + 分隔線），卡片名一次、工項列其下
-        for board, columns in sections:
-            body = []
-            for ci, (lst, cards) in enumerate(columns):
-                if ci > 0:
-                    body.append({"type": "separator", "margin": "lg"})
-                body.append({"type": "text", "text": lst, "weight": "bold", "size": "sm",
-                             "color": _status_color(lst), "wrap": True, "margin": ("none" if ci == 0 else "lg")})
+        # 下段：該看板其餘進行中工項（摘要窗口，去重上段，無按鈕）
+        columns = summary_by_board.get(board)
+        if columns:
+            lower = []
+            for lst, cards in columns:
+                col_block = []
                 for card, labels in cards:
-                    block = [{"type": "text", "text": card, "size": "sm", "weight": "bold",
-                              "color": "#1A1A1A", "wrap": True, "margin": "md"}]
+                    lines = []
                     for lb, overdue in labels:
+                        if (card, lb) in upper_labels:
+                            continue  # 已在上段 → 去重
                         if lb == card and not overdue:
-                            continue  # label 等於卡片名（tag 未填 label 預設值）且未逾期 → 不重列
+                            continue  # label 等於卡片名且未逾期 → 不重列
                         if lb == card:
                             txt, col = "⚠️ 逾期", "#D32F2F"
                         elif overdue:
                             txt, col = f"⚠️ {lb}（逾期）", "#D32F2F"
                         else:
                             txt, col = lb, "#666666"
-                        block.append({"type": "text", "text": f"・{txt}", "size": "xs",
-                                      "color": col, "wrap": True, "margin": "xs"})
-                    body.append({"type": "box", "layout": "vertical", "contents": block})
-            bubbles.append(_summary_bubble(now_str, board, body))
-        # 警告各自一張 bubble，標題即內容主旨（alias / 未歸欄）
-        for title, wlines in warnings:
-            color = "#D32F2F" if title.startswith("⚠️") else "#388E3C"
-            body = [{"type": "text", "text": ln, "size": "sm", "color": "#333333", "wrap": True,
-                     "margin": ("none" if i == 0 else "sm")} for i, ln in enumerate(wlines)]
-            bubbles.append(_summary_bubble(now_str, title, body, title_color=color))
+                        lines.append({"type": "text", "text": f"・{txt}", "size": "xs", "color": col, "wrap": True, "margin": "xs"})
+                    if lines:
+                        col_block.append({"type": "text", "text": card, "size": "sm", "weight": "bold", "color": "#1A1A1A", "wrap": True, "margin": "md"})
+                        col_block.extend(lines)
+                if col_block:
+                    if lower:
+                        lower.append({"type": "separator", "margin": "lg"})
+                    lower.append({"type": "text", "text": lst, "weight": "bold", "size": "sm",
+                                  "color": _status_color(lst), "wrap": True, "margin": "lg"})
+                    lower.extend(col_block)
+            if lower:
+                if body:
+                    body.append({"type": "separator", "margin": "xl"})
+                body.append({"type": "text", "text": "其餘進行中工項", "size": "xs", "color": "#AAAAAA", "wrap": True, "margin": "md"})
+                body.extend(lower)
+
+        if not body:
+            continue
+        bubbles.append({
+            "type": "bubble", "size": "mega",
+            "header": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": f"意念情境・{mode_label}工程", "size": "xs", "color": "#AAAAAA"},
+                {"type": "text", "text": board, "weight": "bold", "size": "md", "wrap": True, "color": "#1A1A1A", "margin": "sm"},
+            ]},
+            "body": {"type": "box", "layout": "vertical", "contents": body},
+        })
+
+    # 警告各自一張 bubble（alias 未對應 / 完成未歸欄）
+    for title, wlines in all_warnings:
+        color = "#D32F2F" if title.startswith("⚠️") else "#388E3C"
+        wbody = [{"type": "text", "text": ln, "size": "sm", "color": "#333333", "wrap": True,
+                  "margin": ("none" if i == 0 else "sm")} for i, ln in enumerate(wlines)]
+        bubbles.append(_summary_bubble(summary_now, title, wbody, title_color=color))
 
     bubbles = bubbles[:12]   # LINE carousel 上限 12 張
     if len(bubbles) == 1:
