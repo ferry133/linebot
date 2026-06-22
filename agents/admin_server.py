@@ -445,6 +445,28 @@ def list_projects():
     return jsonify(rows)
 
 
+def _active_site_type_dup(conn, site_name, project_type, exclude_id=None) -> bool:
+    """True if another active project already has this (site_name, project_type).
+    Backs the public_label uniqueness rule (see change project-public-label)."""
+    with conn.cursor() as cur:
+        sql = ("SELECT 1 FROM projects WHERE status='active' "
+               "AND site_name=%s AND project_type=%s")
+        params = [site_name, project_type]
+        if exclude_id:
+            sql += " AND project_id <> %s::uuid"
+            params.append(exclude_id)
+        cur.execute(sql + " LIMIT 1", params)
+        return cur.fetchone() is not None
+
+
+def _site_type_conflict_resp(site_name, project_type):
+    return jsonify({
+        "error": (f"此建案+工種已有進行中專案：{site_name}-{project_type}。"
+                  f"請把建案名改成可區分（例如加棟別/戶別，如「{site_name}-A棟」）。"),
+        "conflict": "site_type",
+    }), 409
+
+
 @app.post("/api/projects")
 @require_auth
 def create_project():
@@ -478,6 +500,11 @@ def create_project():
 
     if not name:
         return jsonify({"error": "name is required (or supply owner_name + site_name + project_type)"}), 400
+
+    # 對外標籤 (site_name, project_type) 在 active 專案中須唯一（先擋，避免白做 NAS provisioning）
+    if site_name and project_type and db_exec(
+            lambda conn: _active_site_type_dup(conn, site_name, project_type)):
+        return _site_type_conflict_resp(site_name, project_type)
 
     nas_path = None
     nas_warning = None
@@ -713,6 +740,25 @@ def update_project(project_id: str):
                     updates["nas_path"] = moved
             elif old_status == "archived" and new_status == "completed":
                 return jsonify({"error": "請先還原為進行中後再標記已完成"}), 400
+
+    # (site_name, project_type) 在 active 專案中須唯一——改名/改工種/重新啟用都可能撞。
+    # 以「更新後」有效值判斷（排除自己）。
+    def _eff(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT site_name, project_type, status FROM projects WHERE project_id=%s::uuid",
+                (project_id,),
+            )
+            return cur.fetchone()
+    eff = db_exec(_eff)
+    if eff is None:
+        return jsonify({"error": "not found"}), 404
+    eff_site = updates.get("site_name", eff[0])
+    eff_type = updates.get("project_type", eff[1])
+    eff_status = updates.get("status", eff[2])
+    if eff_status == "active" and eff_site and eff_type and db_exec(
+            lambda conn: _active_site_type_dup(conn, eff_site, eff_type, exclude_id=project_id)):
+        return _site_type_conflict_resp(eff_site, eff_type)
 
     def _upd(conn):
         with conn.cursor() as cur:
