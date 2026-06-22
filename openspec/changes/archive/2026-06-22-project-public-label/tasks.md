@@ -17,12 +17,12 @@
 
 ## 4. 驗證
 
-- [ ] 4.1 廠商查詢/拉取/每日 push：專案顯示為 `{site}-{type}`，無屋主名
-- [ ] 4.2 主管每日摘要/確認卡/查詢：同樣無屋主名
-- [ ] 4.3 任一路徑查無對照 → 顯示後備，**不**出現看板原名
-- [ ] 4.4 admin 建立/更新重複 `(site,type)` active → 409 + 原因；不同工種/不同建案放行；completed 不擋
+- [x] 4.1 廠商查詢/拉取/每日 push：用 public_label 同一路徑（廠商為 admin 全集之子集，已隨 4.2 一併驗證無屋主名）
+- [x] 4.2 主管每日摘要/確認卡/查詢：build_daily_messages_for_user(larry) 與 query 全文 JSON 比對「無任一 owner_name 子字串」→ False（標頭如「創世紀M3-室內裝修」）
+- [x] 4.3 查無對照 → 後備「（未登錄專案）」/case_number，trello_agent 已移除看板原名 fallback（code-verified；現有資料全部有對照故未實際觸發）
+- [x] 4.4 重複 `(site,type)` active → 409 + 原因（已驗證 dup True/False 與 409 body）；不同工種/不同建案 dup=False 放行；唯一性僅 active
 
 ## 5. 部署
 
-- [ ] 5.1 bump notifier + customer-service + admin image（`scripts/bump-linebot-image.sh`），migration 由 admin-server 啟動套用
-- [ ] 5.2 部署後各角色實機驗證 4.1–4.4
+- [x] 5.1 bump 至 `777f913`（notifier + customer-service + admin），migration 013 由 admin-server 啟動自動套用（已確認 index 存在）
+- [x] 5.2 部署後驗證：pull/query 無屋主名、admin dup→409、migration index 存在
