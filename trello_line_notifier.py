@@ -474,6 +474,39 @@ def _roles_by_lineid(uids: list[str]) -> dict:
     return _db_exec(_q) or {}
 
 
+# 看板掃描快取（並行批次抓取結果），供 run_checks 重用——尤其是 on-demand「今日提醒」
+# 連續點按時免重掃。寫入工項狀態後由 invalidate_scan_cache() 失效以免顯示過時。
+_SCAN_CACHE: dict = {"data": None, "ts": 0.0}
+_SCAN_TTL = 45  # 秒
+
+
+def invalidate_scan_cache():
+    """工項狀態寫入後呼叫，使下次 run_checks 重新抓取（避免 on-demand 拉取顯示過時）。"""
+    _SCAN_CACHE["data"] = None
+    _SCAN_CACHE["ts"] = 0.0
+
+
+def _scan_boards() -> list[dict]:
+    """並行批次抓取所有 active 看板（{id,name,lists,cards}），帶 TTL 快取。
+    取代舊有逐看板循序 get_lists+get_cards（20 看板從 ~20s 降到 ~2s，命中快取 ~0s）。"""
+    import time as _time
+    now = _time.monotonic()
+    if _SCAN_CACHE["data"] is not None and now - _SCAN_CACHE["ts"] < _SCAN_TTL:
+        return _SCAN_CACHE["data"]
+    boards = get_boards()
+    skip_ids = _inactive_board_ids()
+    active_ids = []
+    for b in boards:
+        if b["id"] in skip_ids:
+            print(f"[notifier] skip non-active project board: {b.get('name')}")
+        else:
+            active_ids.append(b["id"])
+    data = get_boards_batch(active_ids) if active_ids else []  # 並行；空清單避免 ThreadPool(0)
+    _SCAN_CACHE["data"] = data
+    _SCAN_CACHE["ts"] = now
+    return data
+
+
 def run_checks():
     """單一每日批次：一次評估全部觸發條件（#1–#9），回傳 (uid, board_name, rec) 清單。
     主管(internal)額外得每日摘要與可操作確認卡。交付（push 過濾 / on-demand 拉取）由呼叫端決定。"""
@@ -481,20 +514,16 @@ def run_checks():
     _complete_unfiled.clear()
     contacts = load_contacts()
     internal = _internal_recipients()  # 所有管理者/員工 — #3–#7、#9 內部收件人
-    boards = get_boards()
-    skip_ids = _inactive_board_ids()
     label_map = _all_project_names()   # {board_id: 對外 public_label}（去 PII）
+    boards_data = _scan_boards()       # 並行批次 + TTL 快取（取代逐看板循序抓取）
     notifications = []
     summary_items = []
 
-    for board in boards:
-        if board["id"] in skip_ids:
-            print(f"[notifier] skip non-active project board: {board.get('name')}")
-            continue
+    for board in boards_data:
         # 對外顯示一律用 public_label，不顯示 Trello 看板原名（含屋主名）
         board_name = label_map.get(board["id"]) or "（未登錄專案）"
-        list_map = get_lists(board["id"])
-        cards = get_cards(board["id"])
+        list_map = board["lists"]
+        cards = board["cards"]
         for card in cards:
             list_name = list_map.get(card.get("idList", ""), "")
             card_has_check = False      # 此卡是否有帶標記的檢查項
