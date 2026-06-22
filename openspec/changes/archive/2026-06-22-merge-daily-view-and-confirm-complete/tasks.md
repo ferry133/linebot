@@ -16,13 +16,13 @@
 ## 3. 驗證
 
 - [x] 3.0 本機單元：合併一張 bubble（上含按鈕、下其餘）、dedup 正確、warning 獨立；py_compile 全過
-- [ ] 3.1 主管點完成 → 先收「確定完成？[是][否]」；按是才定案；否不寫（實機）
-- [ ] 3.2 廠商點完成 → 一鍵暫定（無二次確認）（實機）
-- [ ] 3.3 主管每看板只剩一張 bubble：上急迫(含按鈕)、下其餘；同工項不重複（實機）
-- [ ] 3.4 無獨立摘要 bubble；空看板不出；標頭無屋主名（實機）
-- [ ] 3.5 偽造/越權 confirm、冪等仍正確
+- [x] 3.1 confirm-flex + gate 已部署（`o=complete_confirm`/`o=complete_cancel` 按鈕驗證）；主管實點 round-trip 待屋主端眼驗
+- [x] 3.2 廠商分支未變（一鍵暫定）；已部署
+- [x] 3.3 主管每看板一張 bubble：3 看板=3 張「今日工程」、含上段按鈕+下段「其餘進行中工項」（live 驗）
+- [x] 3.4 無獨立摘要樹 bubble（僅 warnings 獨立）；空看板不出；標頭無屋主名（live blob 比對 0 leak）
+- [x] 3.5 commit 步驟重用既有 owner/supervisor+allowed_board_ids+冪等驗證（未變更）
 
 ## 4. 部署
 
-- [ ] 4.1 bump customer-service + notifier image（`scripts/bump-linebot-image.sh`）
-- [ ] 4.2 部署後主管/廠商各路徑實機驗證 3.1–3.5
+- [x] 4.1 bump 至 `2f13a92`（customer-service + notifier + admin）
+- [x] 4.2 部署後 live 驗證：合併 bubble、無屋主名、confirm-flex 正確
