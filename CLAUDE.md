@@ -85,9 +85,15 @@ CronJob trello-notifier-daily（08:00 Asia/Taipei，週日至週五 0-5）
 
 - **三批次→單一每日批次**：每日一次（08:00 Sun–Fri）評估 #1–#9，每人一則整合 Flex carousel。
 - **主動 push 僅 vendor**；admin/employee/customer 不被 push。
-- **On-demand 拉取**：Rich Menu「今日提醒」(`o=daily`) 或輸入 DAILY_KEYWORDS → 經 **Reply API（免費）** 回該使用者角色對應內容。主管得摘要+可操作確認卡；廠商/客戶得自己的工項。
-- **廠商標記工項**：暫定生效 + 建 `task_confirmations` pending（含 card_name 快照）；**不即時推主管**，待主管於每日內容追認/退回。
-- 詳見 specs：`consolidated-daily-notification`、`daily-notice-on-demand`、`notification-daily-summary`、`trello-task-status-update`。
+- **On-demand 拉取**：Rich Menu「今日提醒」(`o=daily`) 或輸入 DAILY_KEYWORDS → 經 **Reply API（免費）** 回該使用者角色對應內容。
+- **每看板單一卡片**：主管的每看板把「工項提醒(#1–#8) + 摘要(其餘進行中)」合併為**一張** bubble（上段急迫含按鈕、下段其餘去重）；不再有獨立「每日工程摘要」bubble。`build_flex` 以 `_scan_boards()` **並行批次掃描 + 45s TTL 快取**（今日提醒 ~20s→~2s，warm ~0s；寫入後 `invalidate_scan_cache()` 失效）。
+- **去 PII 專案標籤**：LINE 一律顯示 `public_label = {site_name}-{project_type}`（不含屋主名）；不回退 Trello 看板原名。屋主名只在 Trello/admin UI。
+- **「✅完成」按鈕只給 vendor/customer**（不能碰 Trello 者）；admin/employee **不顯示**，改用 Trello 標記（`build_flex(show_buttons=)` 依角色）。
+- **完成 / 核可流程**：
+  - 廠商/客戶點 ✅完成 → **暫定生效** + 建 `task_confirmations` pending（含 card_name 快照）；**不即時推主管**。
+  - 主管於每日內容看「待主管確認」卡按 **確認/退回**（`_handle_confirmation`）追認或還原廠商的暫定變更。
+  - 主管自己標記工項 → 用 Trello（LINE 無完成鈕）。（早期的「主管完成二次確認(方案3)」已移除。）
+- 詳見 specs：`consolidated-daily-notification`、`daily-notice-on-demand`、`notification-daily-summary`、`trello-task-status-update`、`project-public-label`。
 
 ## RBAC（角色與可見性）
 
