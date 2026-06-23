@@ -632,10 +632,8 @@ class CustomerServiceAgent:
     def _process_postback(self, user_id: str, pb: dict, reply_token: str | None):
         try:
             op = pb.get("o")
-            if op in ("complete", "incomplete", "complete_confirm"):
+            if op in ("complete", "incomplete"):
                 self._handle_status_update(user_id, pb, reply_token)
-            elif op == "complete_cancel":
-                self._reply(user_id, "已取消，未變更。", reply_token)
             elif op in ("confirm", "reject"):
                 self._handle_confirmation(user_id, pb, reply_token)
             elif op == "guide":
@@ -654,7 +652,7 @@ class CustomerServiceAgent:
         checkitem_id = pb.get("i") or None
         source = pb.get("s", "card")
         board_id = pb.get("b", "")
-        complete = op in ("complete", "complete_confirm")
+        complete = (op == "complete")
         display, alias, role = self._user_identity(user_id)
         allowed_board_ids, _ = self._get_user_auth(user_id)
 
@@ -680,11 +678,6 @@ class CustomerServiceAgent:
         if cur_complete == complete:
             self._reply(user_id, f"「{label}」已是{'完成' if complete else '未完成'}狀態。", reply_token)
             return
-        # 主管定案前二次確認（方案3）：主管的「完成」首次點按不直接寫，先回確認；
-        # 廠商一鍵暫定（可被退回）不受此限；complete_confirm（主管已按「是」）直接放行。
-        if op == "complete" and is_supervisor:
-            self._reply_complete_confirm(user_id, reply_token, label, board_id, card_id, checkitem_id, source)
-            return
         # 寫入 Trello
         if source == "checklist":
             sc, ok = set_checkitem_state(card_id, checkitem_id, complete)
@@ -705,32 +698,6 @@ class CustomerServiceAgent:
         card_name = card.get("name", "")
         self._insert_pending(board_id, card_id, checkitem_id, source, label, op, user_id, alias, card_name)
         self._reply(user_id, f"已暫定將「{label}」標記為{act}，將通知主管確認。", reply_token)
-
-    def _complete_confirm_flex(self, label, board_id, card_id, checkitem_id, source):
-        """主管「完成」二次確認泡泡：是=定案寫入(o=complete_confirm)、否=取消。"""
-        yes = f"o=complete_confirm&b={board_id}&c={card_id}&i={checkitem_id or ''}&s={source}"
-        return {
-            "type": "bubble", "size": "kilo",
-            "body": {"type": "box", "layout": "vertical", "contents": [
-                {"type": "text", "text": "確認標記完成", "weight": "bold", "size": "md", "color": "#EF6C00"},
-                {"type": "text", "text": label, "size": "sm", "color": "#1A1A1A", "wrap": True, "margin": "sm"},
-                {"type": "text", "text": "確定要將此工項標記為完成？", "size": "xs", "color": "#666666", "wrap": True, "margin": "sm"},
-                {"type": "box", "layout": "horizontal", "margin": "lg", "spacing": "sm", "contents": [
-                    {"type": "button", "style": "primary", "color": "#388E3C", "height": "sm",
-                     "action": {"type": "postback", "label": "✅ 是，標記完成", "data": yes, "displayText": "確認完成"}},
-                    {"type": "button", "style": "secondary", "height": "sm",
-                     "action": {"type": "postback", "label": "✖ 否", "data": "o=complete_cancel", "displayText": "取消"}},
-                ]},
-            ]},
-        }
-
-    def _reply_complete_confirm(self, user_id, reply_token, label, board_id, card_id, checkitem_id, source):
-        flex = self._complete_confirm_flex(label, board_id, card_id, checkitem_id, source)
-        self.broker.publish(OUTBOX_TOPIC, {
-            "user_id": user_id,
-            "messages": [{"type": "flex", "altText": f"確認完成：{label}"[:400], "contents": flex}],
-            "reply_token": reply_token,
-        })
 
     def _handle_confirmation(self, user_id: str, pb: dict, reply_token: str | None):
         cid = pb.get("cid")
