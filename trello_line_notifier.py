@@ -733,10 +733,12 @@ def _confirm_bubble(rec):
     }
 
 
-def build_flex(items, mode_label):
+def build_flex(items, mode_label, show_buttons=True):
     """將同一收件人的 (board_name, rec) 清單組成 LINE Flex 訊息 contents。
     rec = ("item", 顏色, 抬頭, 子標題, 原始文字, board_id, card_id, checkitem_id, source)、("summary", …) 或 ("confirm", …)。
-    確認卡優先；每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag，附完成/取消按鈕。"""
+    確認卡優先；每個看板一張 bubble；到期狀態以彩色抬頭放最前面，下方完整保留原始 tag。
+    show_buttons：是否顯示「✅完成」按鈕——只給 vendor/customer（不能碰 Trello），
+    admin/employee 改用 Trello 故不顯示。"""
     board_order = []
     by_board = {}
     summaries = []
@@ -799,7 +801,7 @@ def build_flex(items, mode_label):
             ]
             if raw:
                 block.append({"type": "text", "text": raw, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
-            if card_id:
+            if card_id and show_buttons:
                 block.append(_status_buttons(board_id, card_id, checkitem_id, source))
             box = {"type": "box", "layout": "vertical", "contents": block}
             if i > 0:
@@ -891,7 +893,9 @@ def build_daily_messages_for_user(user_id, role=None):
     items = [(board_name, rec) for uid, board_name, rec in notifications if uid == user_id]
     if not items:
         return []
-    contents = build_flex(items, DAILY_LABEL)
+    # ✅完成 按鈕只給 vendor/customer（不能碰 Trello）；admin/employee 用 Trello，不顯示
+    show_buttons = role in ("vendor", "customer")
+    contents = build_flex(items, DAILY_LABEL, show_buttons=show_buttons)
     alt = f"意念情境 {DAILY_LABEL}提醒（{len(items)} 則）"
     return [{"type": "flex", "altText": alt[:400], "contents": contents}]
 
@@ -910,7 +914,9 @@ def run_daily_push():
             continue
         if not items:                    # skip-empty
             continue
-        contents = build_flex(items, DAILY_LABEL)
+        # push 僅送 vendor，本就該顯示 ✅完成 按鈕（依角色判定，與拉取一致）
+        show_buttons = roles.get(uid) in ("vendor", "customer")
+        contents = build_flex(items, DAILY_LABEL, show_buttons=show_buttons)
         alt = f"意念情境 {DAILY_LABEL}提醒（{len(items)} 則）"
         status, resp = send_flex(uid, contents, alt)
         sent += 1
