@@ -147,10 +147,13 @@ def health():
 def aliases():
     """工期表（Google Apps Script）用：回傳已註冊的 `line_users.alias_name` 清單，
     供其過濾「查無對應」負責人——與 LINE 通知的未對應判定同一套來源。
-    以 gateway 既有的 TRELLO_TOKEN 當共用 token（gantt 端 Script Properties 本就有）；
+    以**專屬** `GANTT_API_TOKEN` 經 `Authorization: Bearer <token>` 標頭驗證
+    （不放 query 避免進 log；不重用 TRELLO_TOKEN 以縮小外洩影響範圍），
     未設或不符一律回 404（不洩漏端點存在）。單次查詢，呼叫端自行快取。"""
-    expected = os.environ.get("TRELLO_TOKEN", "")
-    if not expected or request.args.get("token") != expected:
+    expected = os.environ.get("GANTT_API_TOKEN", "")
+    auth = request.headers.get("Authorization", "")
+    provided = auth[7:] if auth.startswith("Bearer ") else request.headers.get("X-Auth-Token", "")
+    if not expected or not hmac.compare_digest(expected, provided):
         abort(404)
 
     def _q(conn):

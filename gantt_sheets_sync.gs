@@ -92,17 +92,21 @@ function parseTag_(text) {
 }
 
 // 一次抓取「已註冊負責人」alias 清單（line_users.alias_name，與 LINE 通知同一來源），
-// 回傳小寫 Set 存記憶體供整次同步重用；未設定 ALIASES_URL 時回 null（不過濾，graceful）。
-// 在 Script Properties 設 ALIASES_URL（如 https://<gateway 網域>/aliases）；
-// token 重用既有的 TRELLO_TOKEN（gateway 以同一 token 驗證）。
+// 回傳小寫 Set 存記憶體供整次同步重用；未設定時回 null（不過濾，graceful）。
+// Script Properties 需設：ALIASES_URL（如 https://<gateway 網域>/aliases）、
+// GANTT_API_TOKEN（專屬 token，與 gateway 的 GANTT_API_TOKEN 相同；以 Bearer 標頭送出）。
 function fetchValidAliases_() {
   const props = PropertiesService.getScriptProperties();
   const url   = props.getProperty("ALIASES_URL");
-  const token = props.getProperty("TRELLO_TOKEN");
+  const token = props.getProperty("GANTT_API_TOKEN");
   if (!url || !token) return null;
-  const res = UrlFetchApp.fetch(`${url}?token=${encodeURIComponent(token)}`, { muteHttpExceptions: true });
+  const res = UrlFetchApp.fetch(url, {
+    muteHttpExceptions: true,
+    headers: { "Authorization": "Bearer " + token },
+  });
   if (res.getResponseCode() !== 200) {
-    throw new Error(`aliases API ${res.getResponseCode()}: ${res.getContentText()}`);
+    Logger.log(`aliases API ${res.getResponseCode()} — 略過負責人過濾`);
+    return null;  // 取不到 → 不過濾（甘特圖照常產生），避免整次同步失敗
   }
   const data = JSON.parse(res.getContentText());
   return new Set((data.aliases || []).map(a => String(a).toLowerCase()));
