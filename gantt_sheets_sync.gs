@@ -30,8 +30,17 @@ const BAR_COLORS = {
   desc:       "#fbbc04",  // 黃 — card description 項目
 };
 
+// end-only items（只有結束日，無開始日）使用淡色版本
+const BAR_COLORS_LIGHT = {
+  complete:   "#b7e1c4",
+  incomplete: "#c5d9fb",
+  overdue:    "#f5c6c2",
+  desc:       "#fde9a2",
+};
+
 // 奇偶週交替底色（無 bar 時顯示）
-const BAND = ["#ffffff", "#d9d9d9"];
+const BAND       = ["#ffffff", "#d9d9d9"];
+const BAND_TODAY = "#f9cb9c";  // 今天欄的底色（橙色）
 
 
 // ─── 工具函式 ──────────────────────────────────────────────
@@ -48,8 +57,18 @@ function getDays_() {
 
 function dayOverlaps_(day, start, end) {
   if (start && end)  return day >= start && day <= end;
-  if (start)         return day >= start;
-  if (end)           return day <= end;
+  if (start) {
+    // start-only：只繪製開始日後 7 天（含）的窗口
+    const effEnd = new Date(start);
+    effEnd.setDate(effEnd.getDate() + 6);
+    return day >= start && day <= effEnd;
+  }
+  if (end) {
+    // end-only：只繪製結束日前 7 天（含）的窗口
+    const effStart = new Date(end);
+    effStart.setDate(effStart.getDate() - 6);
+    return day >= effStart && day <= end;
+  }
   return false;
 }
 
@@ -86,9 +105,35 @@ function trelloGet_(path, qs) {
 
 // ─── 資料收集 ──────────────────────────────────────────────
 
+// 反向掃描 rows，標記各組的 last 旗標，供 ASCII 樹狀符號使用。
+// card rows: lastInBoard（該 board 最後一張卡）、lastInList（該 board+list 最後一張卡）
+// item rows: lastItem（該 card 最後一個工項）
+function markLastFlags_(rows) {
+  const seenBoards    = new Set();
+  const seenLists     = new Set();
+  const seenCardItems = new Set();
+
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r.type === 'card') {
+      const boardKey = r.board;
+      const listKey  = `${r.board}||${r.list}`;
+      r.lastInBoard = !seenBoards.has(boardKey);
+      r.lastInList  = !seenLists.has(listKey);
+      seenBoards.add(boardKey);
+      seenLists.add(listKey);
+    } else {
+      const cardKey = `${r.board}||${r.list}||${r.card}`;
+      r.lastItem = !seenCardItems.has(cardKey);
+      seenCardItems.add(cardKey);
+    }
+  }
+}
+
 function collectItems_() {
   const boards = trelloGet_(`/organizations/${WORKSPACE_ID}/boards`, "filter=open");
   const rows   = [];
+  const today  = new Date(); today.setHours(0, 0, 0, 0);
 
   for (const board of boards) {
     if (board.name.includes("母版")) continue;
@@ -98,34 +143,103 @@ function collectItems_() {
     const cards   = trelloGet_(`/boards/${board.id}/cards`, "checklists=all&fields=name,desc,idList,dueComplete");
 
     for (const card of cards) {
+
       const listName = listMap[card.idList] || "";
 
-      // Card description 第一行
+      // Card description tag — 不計入進度統計，但以 item row 形式顯示。
+      // 其完成 = 卡片 dueComplete（與通知一致），否則 dueComplete 的完成卡會被誤判逾期。
+      let descRow = null;
       if (card.desc) {
         const parsed = parseTag_(card.desc.split("\n")[0]);
         if (parsed) {
-          rows.push({ board: board.name, list: listName, card: card.name,
+          descRow = {
+            type:  'item',
+            board: board.name,
+            list:  listName,
+            card:  card.name,
             label: parsed.label,
             names: parsed.names.join("、"),
-            // card 層級工項完成 = 卡片 dueComplete（與通知一致），否則完成卡會被誤判逾期
-            start: parsed.start, end: parsed.end,
-            state: card.dueComplete ? "complete" : "incomplete" });
+            start: parsed.start,
+            end:   parsed.end,
+            state: card.dueComplete ? 'complete' : 'incomplete',
+          };
         }
       }
 
-      // Checklist 項目
+      // Checklist 項目（有 [@...] 標記的）
+      const itemRows = [];
       for (const cl of (card.checklists || [])) {
         for (const item of (cl.checkItems || [])) {
           const parsed = parseTag_(item.name);
           if (!parsed) continue;
-          rows.push({ board: board.name, list: listName, card: card.name,
-            label: parsed.label, names: parsed.names.join("、"),
-            start: parsed.start, end: parsed.end, state: item.state });
+          itemRows.push({
+            type:  'item',
+            board: board.name,
+            list:  listName,
+            card:  card.name,
+            label: parsed.label,
+            names: parsed.names.join("、"),
+            start: parsed.start,
+            end:   parsed.end,
+            state: item.state,
+          });
         }
       }
+
+      // Card-level 統計（只計算 checklist items）
+      const totalCount    = itemRows.length;
+      const completeCount = itemRows.filter(r => r.state === 'complete').length;
+
+      let cardStart = null;
+      let cardEnd   = null;
+      for (const r of itemRows) {
+        if (r.start) cardStart = cardStart ? (r.start < cardStart ? r.start : cardStart) : r.start;
+        if (r.end)   cardEnd   = cardEnd   ? (r.end   > cardEnd   ? r.end   : cardEnd)   : r.end;
+      }
+
+      // 無任何標記（no checklist tags, no desc tag）→ 直接跳過
+      if (totalCount === 0 && descRow === null) continue;
+
+      // desc-only：desc tag 的日期/名稱直接合併進 card summary row，不單獨輸出
+      const isDescOnly  = totalCount === 0 && descRow !== null;
+      const cardNames   = isDescOnly ? descRow.names : '';
+      const finalStart  = isDescOnly ? descRow.start : cardStart;
+      const finalEnd    = isDescOnly ? descRow.end   : cardEnd;
+
+      const hasOverdue  = isDescOnly
+        ? (descRow.end && descRow.end < today && !card.dueComplete)
+        : itemRows.some(r => r.end && r.end < today && r.state !== 'complete');
+      const allComplete  = card.dueComplete === true || (totalCount > 0 && completeCount === totalCount);
+      const isNotStarted = !allComplete && finalStart && finalStart < today && listName.includes("未執行");
+      const cardBarColor = allComplete ? BAR_COLORS.complete
+                         : hasOverdue  ? BAR_COLORS.overdue
+                                       : BAR_COLORS.incomplete;
+
+      // Card summary row
+      rows.push({
+        type:        'card',
+        board:       board.name,
+        list:        listName,
+        card:        card.name,
+        label:       `${completeCount}/${totalCount} 完成`,
+        names:       cardNames,
+        start:       finalStart,
+        end:         finalEnd,
+        state:       '',
+        barColor:    cardBarColor,
+        status:      allComplete  ? "✓ 完成"
+                   : isNotStarted ? "未開始"
+                   : hasOverdue   ? "逾期"
+                                  : "未完成",
+        startOverdue: isNotStarted,
+      });
+
+      if (descRow && !isDescOnly) rows.push(descRow);  // 有 checklist items 時才單獨顯示 desc row
+      if (itemRows.length)        rows.push(...itemRows);
     }
   }
 
+  markLastFlags_(rows);
   return rows;
 }
 
@@ -147,8 +261,10 @@ function syncTrelloGantt() {
   // 甘特欄寬：每欄 22px，視覺緊湊
   sheet.setColumnWidths(9, GANTT_DAYS, 22);
 
-  // 預計算每天的奇偶週底色（標題列與資料列共用）
-  const bandRow = days.map((d, i) => BAND[Math.floor(i / 7) % 2]);
+  // 預計算每天的奇偶週底色（今天欄用橙色，標題列與資料列共用）
+  const bandRow = days.map((d, i) =>
+    d.getTime() === today.getTime() ? BAND_TODAY : BAND[Math.floor(i / 7) % 2]
+  );
 
   // 標題列 1：每週日顯示 "mm/dd~mm/dd"（週日~週六），其餘留空
   const row1 = Array(8).fill("").concat(
@@ -176,16 +292,17 @@ function syncTrelloGantt() {
   sheet.getRange(1, 9, 1, GANTT_DAYS).setBackgrounds([bandRow]);
   sheet.getRange(2, 9, 1, GANTT_DAYS).setBackgrounds([bandRow]);
 
-  // 清除舊資料與舊顏色（第 3 列起）
+  // 清除舊資料與舊顏色（第 3 列起），並取消舊版留下的隱藏列
   const lastRow = sheet.getLastRow();
   if (lastRow >= 3) {
     const clearRange = sheet.getRange(3, 1, lastRow - 2, 8 + GANTT_DAYS);
     clearRange.clearContent();
     clearRange.setBackground("#ffffff");
     clearRange.setFontColor("#000000");
+    sheet.showRows(3, lastRow - 2);
   }
 
-  // 取得最新 Trello 資料
+  // 取得最新 Trello 資料（card summary rows + item rows）
   const items = collectItems_();
   if (items.length === 0) {
     sheet.getRange(3, 1).setValue("（無符合標記的工項）");
@@ -195,49 +312,110 @@ function syncTrelloGantt() {
   // 組成資料矩陣與甘特色票矩陣
   const dataRows   = [];
   const ganttBgAll = [];
+  const cellBgCols = [];  // A~H 欄底色（card row=灰，item row=白）
+  let   prevBoard  = null;
+  let   prevList   = null;
 
   for (const r of items) {
-    const status = r.state === "complete"   ? "✓ 完成"
-                 : r.state === "incomplete" ? "進行中"
-                 : "";
+    if (r.type === 'card') {
+      // A/B 欄：board/list 有變動才填名稱，否則填 ASCII 樹狀連接符
+      const showBoard = r.board !== prevBoard;
+      const showList  = showBoard || r.list !== prevList;
 
-    const isOverdue = r.end && r.end < today && r.state !== "complete";
-    const barColor  = r.state === "complete"   ? BAR_COLORS.complete
-                    : isOverdue                ? BAR_COLORS.overdue
-                    : r.state === "incomplete" ? BAR_COLORS.incomplete
-                    : BAR_COLORS.desc;
+      const aVal = showBoard ? r.board : (r.lastInBoard ? "└─ " : "│");
+      const bVal = showList  ? r.list  : (r.lastInList  ? "└─ " : "├─ ");
 
-    // bar 色覆蓋底色，空格顯示奇偶週底色
-    ganttBgAll.push(
-      days.map((d, i) => dayOverlaps_(d, r.start, r.end) ? barColor : bandRow[i])
-    );
+      prevBoard = r.board;
+      prevList  = r.list;
 
-    dataRows.push([
-      r.board, r.list, r.card, r.label, r.names,
-      r.start ? fmt(r.start, "yyyy/MM/dd") : "",
-      r.end   ? fmt(r.end,   "yyyy/MM/dd") : "",
-      status,
-      ...Array(GANTT_DAYS).fill(""),
-    ]);
+      const ganttRow = days.map((d, i) =>
+        (r.start || r.end) && dayOverlaps_(d, r.start, r.end) ? r.barColor : bandRow[i]
+      );
+      ganttBgAll.push(ganttRow);
+      cellBgCols.push("#e8e8e8");
+
+      const ganttVals = Array(GANTT_DAYS).fill("");
+      if (r.start) { const i = Math.round((r.start - GANTT_START) / 86400000); if (i >= 0 && i < GANTT_DAYS) ganttVals[i] = "S"; }
+      if (r.end)   { const i = Math.round((r.end   - GANTT_START) / 86400000); if (i >= 0 && i < GANTT_DAYS) ganttVals[i] = "E"; }
+
+      dataRows.push([
+        aVal, bVal, r.card, r.label, r.names,
+        r.start ? fmt(r.start, "yyyy/MM/dd") : "",
+        r.end   ? fmt(r.end,   "yyyy/MM/dd") : "",
+        r.status,
+        ...ganttVals,
+      ]);
+
+    } else { // item
+      const isOverdue   = r.end && r.end < today && r.state !== 'complete';
+      const isStartOnly = !!r.start && !r.end;
+      const isEndOnly   = !r.start && !!r.end;
+      const isFaded     = isStartOnly || isEndOnly;
+      const barKey      = r.state === 'complete'   ? 'complete'
+                        : isOverdue                ? 'overdue'
+                        : r.state === 'incomplete' ? 'incomplete'
+                        : 'desc';
+      const barColor    = isFaded ? BAR_COLORS_LIGHT[barKey] : BAR_COLORS[barKey];
+
+      const ganttRow = days.map((d, i) =>
+        dayOverlaps_(d, r.start, r.end) ? barColor : bandRow[i]
+      );
+      ganttBgAll.push(ganttRow);
+      cellBgCols.push("#ffffff");
+
+      const cVal  = r.lastItem ? "└─ " : "├─ ";
+      const status = r.state === 'complete'   ? "✓ 完成"
+                   : isOverdue                ? "逾期"
+                   : r.state === 'incomplete' ? "未完成"
+                   : "";
+
+      const ganttVals = Array(GANTT_DAYS).fill("");
+      if (r.start) { const i = Math.round((r.start - GANTT_START) / 86400000); if (i >= 0 && i < GANTT_DAYS) ganttVals[i] = "S"; }
+      if (r.end)   { const i = Math.round((r.end   - GANTT_START) / 86400000); if (i >= 0 && i < GANTT_DAYS) ganttVals[i] = "E"; }
+
+      dataRows.push([
+        "", "", cVal, r.label, r.names,
+        r.start ? fmt(r.start, "yyyy/MM/dd") : "",
+        r.end   ? fmt(r.end,   "yyyy/MM/dd") : "",
+        status,
+        ...ganttVals,
+      ]);
+    }
   }
 
   // 寫入文字資料
   sheet.getRange(3, 1, dataRows.length, dataRows[0].length).setValues(dataRows);
 
+  // A~H 欄底色（card summary rows = 灰色 #e8e8e8，item rows = 白色）
+  sheet.getRange(3, 1, cellBgCols.length, 8)
+    .setBackgrounds(cellBgCols.map(c => Array(8).fill(c)));
+
   // 套用甘特背景色（第 9 欄起）
   sheet.getRange(3, 9, ganttBgAll.length, GANTT_DAYS).setBackgrounds(ganttBgAll);
 
-  // 逾期行：結束日欄（G）顯示紅色
+  // 逾期工項：結束日欄（G）顯示紅色字體
   const endColColors = items.map(r => {
-    const isOverdue = r.end && r.end < today && r.state !== "complete";
+    if (r.type !== 'item') return ["#000000"];
+    const isOverdue = r.end && r.end < today && r.state !== 'complete';
     return [isOverdue ? "#ea4335" : "#000000"];
   });
   sheet.getRange(3, 7, items.length, 1).setFontColors(endColColors);
+
+  // 未開始 card（未執行清單 + 開始日已過）：F欄開始日、H欄狀態 顯示紅色字體
+  const startColColors  = items.map(r => [r.startOverdue ? "#ea4335" : "#000000"]);
+  const statusColColors = items.map(r => {
+    if (r.type === 'card') return [r.startOverdue || r.status === "逾期" ? "#ea4335" : "#000000"];
+    const isOverdue = r.end && r.end < today && r.state !== 'complete';
+    return [isOverdue ? "#ea4335" : "#000000"];
+  });
+  sheet.getRange(3, 6, items.length, 1).setFontColors(startColColors);
+  sheet.getRange(3, 8, items.length, 1).setFontColors(statusColColors);
 
   // 時間戳記
   sheet.getRange(3 + dataRows.length + 1, 1)
     .setValue(`上次同步：${fmt(new Date(), "yyyy/MM/dd HH:mm")}`);
 
+  const itemCount = items.filter(r => r.type === 'item').length;
   SpreadsheetApp.getActiveSpreadsheet()
-    .toast(`✅ 已同步 ${items.length} 個工項`, "Trello 同步完成", 5);
+    .toast(`✅ 已同步 ${itemCount} 個工項`, "Trello 同步完成", 5);
 }
