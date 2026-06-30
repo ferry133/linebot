@@ -15,7 +15,7 @@ import os
 import threading
 
 import requests
-from flask import Flask, abort, request
+from flask import Flask, abort, jsonify, request
 
 from shared.broker import MQTTBroker
 from shared.db import db_exec
@@ -141,6 +141,27 @@ def _parse_postback(data: str) -> dict:
 @app.route("/health")
 def health():
     return "ok"
+
+
+@app.route("/aliases", methods=["GET"])
+def aliases():
+    """工期表（Google Apps Script）用：回傳已註冊的 `line_users.alias_name` 清單，
+    供其過濾「查無對應」負責人——與 LINE 通知的未對應判定同一套來源。
+    以 gateway 既有的 TRELLO_TOKEN 當共用 token（gantt 端 Script Properties 本就有）；
+    未設或不符一律回 404（不洩漏端點存在）。單次查詢，呼叫端自行快取。"""
+    expected = os.environ.get("TRELLO_TOKEN", "")
+    if not expected or request.args.get("token") != expected:
+        abort(404)
+
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT alias_name FROM line_users "
+                "WHERE alias_name IS NOT NULL AND alias_name <> ''"
+            )
+            return [row[0] for row in cur.fetchall()]
+
+    return jsonify({"aliases": db_exec(_q) or []})
 
 
 @app.route("/webhook", methods=["POST"])

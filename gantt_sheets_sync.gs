@@ -91,9 +91,21 @@ function parseTag_(text) {
   return { names, start: parseDate_(m[2]), end: parseDate_(m[3]), label: m[5].trim() };
 }
 
-// 略過「未定負責人」的佔位工項：負責人名含 "??"（如 木??、泥??）— 尚未指派，不列入工期表
-function isUndecidedOwner_(names) {
-  return names.some(n => n.indexOf("??") !== -1);
+// 一次抓取「已註冊負責人」alias 清單（line_users.alias_name，與 LINE 通知同一來源），
+// 回傳小寫 Set 存記憶體供整次同步重用；未設定 ALIASES_URL 時回 null（不過濾，graceful）。
+// 在 Script Properties 設 ALIASES_URL（如 https://<gateway 網域>/aliases）；
+// token 重用既有的 TRELLO_TOKEN（gateway 以同一 token 驗證）。
+function fetchValidAliases_() {
+  const props = PropertiesService.getScriptProperties();
+  const url   = props.getProperty("ALIASES_URL");
+  const token = props.getProperty("TRELLO_TOKEN");
+  if (!url || !token) return null;
+  const res = UrlFetchApp.fetch(`${url}?token=${encodeURIComponent(token)}`, { muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) {
+    throw new Error(`aliases API ${res.getResponseCode()}: ${res.getContentText()}`);
+  }
+  const data = JSON.parse(res.getContentText());
+  return new Set((data.aliases || []).map(a => String(a).toLowerCase()));
 }
 
 function trelloGet_(path, qs) {
@@ -140,6 +152,11 @@ function collectItems_() {
   const rows   = [];
   const today  = new Date(); today.setHours(0, 0, 0, 0);
 
+  // 一次抓取有效 alias，整次同步重用。負責人有任一不在清單(=LINE「查無對應」)→ 略過該工項。
+  const validAliases = fetchValidAliases_();
+  const hasUnmatchedOwner = (names) =>
+    validAliases !== null && names.some(n => !validAliases.has(String(n).toLowerCase()));
+
   for (const board of boards) {
     if (board.name.includes("母版")) continue;
 
@@ -156,7 +173,7 @@ function collectItems_() {
       let descRow = null;
       if (card.desc) {
         const parsed = parseTag_(card.desc.split("\n")[0]);
-        if (parsed && !isUndecidedOwner_(parsed.names)) {
+        if (parsed && !hasUnmatchedOwner(parsed.names)) {
           descRow = {
             type:  'item',
             board: board.name,
@@ -177,7 +194,7 @@ function collectItems_() {
         for (const item of (cl.checkItems || [])) {
           const parsed = parseTag_(item.name);
           if (!parsed) continue;
-          if (isUndecidedOwner_(parsed.names)) continue;  // 未定負責人(??)的佔位工項不列入
+          if (hasUnmatchedOwner(parsed.names)) continue;  // 負責人未在用戶管理(查無對應)→ 不列入
           itemRows.push({
             type:  'item',
             board: board.name,

@@ -87,9 +87,30 @@ def week_overlaps(week_start, start, end):
     return False
 
 
+def _valid_aliases():
+    """已註冊 line_users.alias_name 的小寫 set（與 LINE「查無對應」同一來源），
+    無 DB 時回 None（不過濾）。一次查詢，由 collect_items 快取重用。"""
+    try:
+        from shared.db import db_exec
+    except Exception:
+        return None
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT alias_name FROM line_users "
+                        "WHERE alias_name IS NOT NULL AND alias_name <> ''")
+            return {r[0].lower() for r in cur.fetchall()}
+    try:
+        return db_exec(_q)
+    except Exception:
+        return None
+
+
 def collect_items():
     boards = get_boards()
     rows = []
+    valid = _valid_aliases()   # 一次查詢，整批重用；None=無 DB → 不過濾
+    def _unmatched(names):     # 負責人有任一不在用戶管理 → 該工項不列入
+        return valid is not None and any(n.lower() not in valid for n in names)
 
     for board in boards:
         board_name = board["name"]
@@ -106,7 +127,7 @@ def collect_items():
             if card.get("desc"):
                 first_line = card["desc"].split("\n")[0]
                 parsed = parse_tag(first_line)
-                if parsed and not any("??" in n for n in parsed[0]):  # 略過未定負責人(??)
+                if parsed and not _unmatched(parsed[0]):
                     names, start, end, label = parsed
                     rows.append({
                         "board": board_name,
@@ -127,7 +148,7 @@ def collect_items():
                     parsed = parse_tag(item["name"])
                     if not parsed:
                         continue
-                    if any("??" in n for n in parsed[0]):  # 略過未定負責人(??)
+                    if _unmatched(parsed[0]):
                         continue
                     names, start, end, label = parsed
                     rows.append({
