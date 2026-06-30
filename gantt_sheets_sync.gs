@@ -91,6 +91,11 @@ function parseTag_(text) {
   return { names, start: parseDate_(m[2]), end: parseDate_(m[3]), label: m[5].trim() };
 }
 
+// 略過「未定負責人」的佔位工項：負責人名含 "??"（如 木??、泥??）— 尚未指派，不列入工期表
+function isUndecidedOwner_(names) {
+  return names.some(n => n.indexOf("??") !== -1);
+}
+
 function trelloGet_(path, qs) {
   const props = PropertiesService.getScriptProperties();
   const key   = props.getProperty("TRELLO_API_KEY");
@@ -151,7 +156,7 @@ function collectItems_() {
       let descRow = null;
       if (card.desc) {
         const parsed = parseTag_(card.desc.split("\n")[0]);
-        if (parsed) {
+        if (parsed && !isUndecidedOwner_(parsed.names)) {
           descRow = {
             type:  'item',
             board: board.name,
@@ -172,6 +177,7 @@ function collectItems_() {
         for (const item of (cl.checkItems || [])) {
           const parsed = parseTag_(item.name);
           if (!parsed) continue;
+          if (isUndecidedOwner_(parsed.names)) continue;  // 未定負責人(??)的佔位工項不列入
           itemRows.push({
             type:  'item',
             board: board.name,

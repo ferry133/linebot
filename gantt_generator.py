@@ -106,7 +106,7 @@ def collect_items():
             if card.get("desc"):
                 first_line = card["desc"].split("\n")[0]
                 parsed = parse_tag(first_line)
-                if parsed:
+                if parsed and not any("??" in n for n in parsed[0]):  # 略過未定負責人(??)
                     names, start, end, label = parsed
                     rows.append({
                         "board": board_name,
@@ -126,6 +126,8 @@ def collect_items():
                 for item in checklist.get("checkItems", []):
                     parsed = parse_tag(item["name"])
                     if not parsed:
+                        continue
+                    if any("??" in n for n in parsed[0]):  # 略過未定負責人(??)
                         continue
                     names, start, end, label = parsed
                     rows.append({
