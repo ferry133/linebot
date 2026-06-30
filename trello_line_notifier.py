@@ -43,11 +43,13 @@ _unresolved_aliases: dict[str, set[str]] = {}
 _complete_unfiled: list[str] = []
 
 
-def _resolve_tag_recipients(names: list[str], source: str | None = None) -> list[str]:
+def _resolve_tag_recipients(names: list[str], source: str | None = None,
+                            record_unresolved: bool = True) -> list[str]:
     """Resolve Trello tag names to LINE IDs via alias_name DB lookup.
 
     未對應的名字除了印 log，也累積到 _unresolved_aliases（含可選出處 source），
-    供 morning 每日摘要呈現給 SA/Larry。
+    供每日摘要的「查無對應 LINE 帳號」警告呈現。`record_unresolved=False` 時只解析、
+    不累積警告——用於**已完成**工項（已完成者不需提醒補帳號）。
     """
     if not names or _db_exec is None:
         return []
@@ -63,7 +65,7 @@ def _resolve_tag_recipients(names: list[str], source: str | None = None) -> list
     for n in names:
         if n in mapping:
             result.append(mapping[n])
-        else:
+        elif record_unresolved:
             print(f"[notifier] WARNING: alias not found: {n}")
             srcs = _unresolved_aliases.setdefault(n, set())
             if source:
@@ -370,7 +372,8 @@ def fmt_item(list_name, card_name, body):
 
 def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, internal, is_complete: bool = False,
                board_id="", card_id="", checkitem_id=None, source="card"):
-    sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}") or [contacts[n] for n in names if n in contacts]
+    # 已完成工項不累積「查無對應 LINE 帳號」警告（已完成者不需提醒補帳號）
+    sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}", record_unresolved=not is_complete) or [contacts[n] for n in names if n in contacts]
     sub = f"{list_name}/{card_name}"
     # #3~#6 共用前提：載體未完成（card dueComplete / checklist state）才發送
     # → 打勾完成的工項不再收到到期/逾期通知（#1/#2 開始日不受此限；清單名稱不當抑制）
