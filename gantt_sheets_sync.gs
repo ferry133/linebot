@@ -95,7 +95,7 @@ function collectItems_() {
 
     const lists   = trelloGet_(`/boards/${board.id}/lists`, "fields=name");
     const listMap = Object.fromEntries(lists.map(l => [l.id, l.name]));
-    const cards   = trelloGet_(`/boards/${board.id}/cards`, "checklists=all&fields=name,desc,idList");
+    const cards   = trelloGet_(`/boards/${board.id}/cards`, "checklists=all&fields=name,desc,idList,dueComplete");
 
     for (const card of cards) {
       const listName = listMap[card.idList] || "";
@@ -107,7 +107,9 @@ function collectItems_() {
           rows.push({ board: board.name, list: listName, card: card.name,
             label: parsed.label,
             names: parsed.names.join("、"),
-            start: parsed.start, end: parsed.end, state: "" });
+            // card 層級工項完成 = 卡片 dueComplete（與通知一致），否則完成卡會被誤判逾期
+            start: parsed.start, end: parsed.end,
+            state: card.dueComplete ? "complete" : "incomplete" });
         }
       }
 

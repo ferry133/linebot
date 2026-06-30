@@ -68,7 +68,7 @@ def get_cards(board_id):
         "key": TRELLO_KEY,
         "token": TRELLO_TOKEN,
         "checklists": "all",
-        "fields": "name,desc,idList",
+        "fields": "name,desc,idList,dueComplete",
     }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
@@ -116,7 +116,9 @@ def collect_items():
                         "names": "、".join(names),
                         "start": start,
                         "end": end,
-                        "state": "",
+                        # card 層級工項完成 = 卡片 dueComplete（與通知邏輯一致），
+                        # 否則 dueComplete 的完成卡會被誤判逾期。
+                        "state": "complete" if card.get("dueComplete") else "incomplete",
                     })
 
             # Checklist 項目
