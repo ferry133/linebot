@@ -29,5 +29,5 @@
 
 ## 6. 部署
 
-- [ ] 6.1 bump image（gateway + customer-service + notifier 同 image）
-- [ ] 6.2 部署後實機：datetimepicker 選日 → 回覆該日內容（含唯讀、標頭、入口按鈕）
+- [x] 6.1 bump image（gateway + customer-service + notifier 同 image）
+- [x] 6.2 部署後實機：datetimepicker 選日 → 回覆該日內容（含唯讀、標頭、入口按鈕）
