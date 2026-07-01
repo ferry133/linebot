@@ -20,5 +20,5 @@
 
 ## 4. 部署
 
-- [ ] 4.1 bump notifier + customer-service image（`scripts/bump-linebot-image.sh`）
-- [ ] 4.2 部署後主管/廠商各路徑實機驗證 3.1–3.5
+- [x] 4.1 bump notifier + customer-service image（`scripts/bump-linebot-image.sh`）
+- [x] 4.2 部署後主管/廠商各路徑實機驗證 3.1–3.5
