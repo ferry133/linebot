@@ -512,14 +512,15 @@ def _scan_boards() -> list[dict]:
 
 
 def _summary_sections(items_list):
-    """把 [(board, list, card, label, overdue), ...] 收斂成 per-board 欄樹 sections
-    （board → 狀態欄 → 卡片 → [(label, overdue)]，同卡收斂、同工項去重）。"""
+    """把 [(board, list, card, label, overdue, raw), ...] 收斂成 per-board 欄樹 sections
+    （board → 狀態欄 → 卡片 → [(label, overdue, raw)]，同卡收斂、同工項去重）。
+    raw = 原始 tag 文字（含 [@(alias),期間]），供下段與上段同款呈現。"""
     from collections import OrderedDict
     tree = OrderedDict()
-    for board, lst, card, label, overdue in items_list:
+    for board, lst, card, label, overdue, raw in items_list:
         cards = tree.setdefault(board, OrderedDict()).setdefault(lst, OrderedDict())
         labels = cards.setdefault(card, [])
-        entry = (label, overdue)
+        entry = (label, overdue, raw)
         if entry not in labels:
             labels.append(entry)
 
@@ -582,7 +583,7 @@ def run_checks():
                     if _in_summary(start, end, is_complete):
                         overdue = _summary_overdue(start, end)
                         for uid in (set(sponsors) | internal_set):
-                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue))
+                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue, first_line.strip()))
 
             for checklist in card.get("checklists", []):
                 items = checklist.get("checkItems", [])
@@ -602,7 +603,7 @@ def run_checks():
                     if _in_summary(start, end, is_complete):
                         overdue = _summary_overdue(start, end)
                         for uid in (set(sponsors) | internal_set):
-                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue))
+                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue, item["name"].strip()))
 
                 if not has_tag:
                     continue
@@ -820,13 +821,14 @@ def build_flex(items, mode_label, show_buttons=True):
             body.append(box)
 
         # 下段：該看板其餘進行中工項（摘要窗口，去重上段，無按鈕）
-        # 格式對齊上段「?天內到期」：彩色抬頭 + 灰路徑(list/card) + 深色內文(label)
+        # 格式與上段「?天內到期」完全同款：彩色抬頭「進行中/已逾期」+ 灰路徑(list/card)
+        # + 深色原始 tag 內文(含 [@(alias),期間])。不另加區段標題（避免與抬頭重複）。
         columns = summary_by_board.get(board)
         if columns:
             lower_boxes = []
             for lst, cards in columns:
                 for card, labels in cards:
-                    for lb, overdue in labels:
+                    for lb, overdue, raw in labels:
                         if (card, lb) in upper_labels:
                             continue  # 已在上段 → 去重
                         headline = "已逾期" if overdue else "進行中"
@@ -835,19 +837,13 @@ def build_flex(items, mode_label, show_buttons=True):
                             {"type": "text", "text": headline, "weight": "bold", "color": color, "size": "md", "wrap": True},
                             {"type": "text", "text": f"{lst}/{card}", "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
                         ]
-                        # card 層級（label 預設為卡片名）→ 路徑已含卡片名，不再重複內文
-                        if lb != card:
-                            blk.append({"type": "text", "text": lb, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
+                        if raw:
+                            blk.append({"type": "text", "text": raw, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
                         lower_boxes.append(blk)
-            if lower_boxes:
+            for j, blk in enumerate(lower_boxes):
                 if body:
-                    body.append({"type": "separator", "margin": "xl"})
-                body.append({"type": "text", "text": "其餘進行中工項", "size": "xs", "color": "#AAAAAA", "wrap": True, "margin": "md"})
-                for j, blk in enumerate(lower_boxes):
-                    box = {"type": "box", "layout": "vertical", "contents": blk, "margin": ("lg" if j > 0 else "md")}
-                    if j > 0:
-                        body.append({"type": "separator", "margin": "lg"})
-                    body.append(box)
+                    body.append({"type": "separator", "margin": "xl" if j == 0 else "lg"})
+                body.append({"type": "box", "layout": "vertical", "contents": blk, "margin": "lg"})
 
         if not body:
             continue
