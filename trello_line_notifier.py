@@ -404,6 +404,7 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
     # #6 已逾期（所有執行日皆呈現；批次排程 Sun–Fri，週六不跑）
     if active and end and days_diff(end) < 0:
         add(set(sponsors + internal), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
+    return sponsors
 
 
 def _inactive_board_ids() -> set:
@@ -510,17 +511,50 @@ def _scan_boards() -> list[dict]:
     return data
 
 
+def _summary_sections(items_list):
+    """把 [(board, list, card, label, overdue), ...] 收斂成 per-board 欄樹 sections
+    （board → 狀態欄 → 卡片 → [(label, overdue)]，同卡收斂、同工項去重）。"""
+    from collections import OrderedDict
+    tree = OrderedDict()
+    for board, lst, card, label, overdue in items_list:
+        cards = tree.setdefault(board, OrderedDict()).setdefault(lst, OrderedDict())
+        labels = cards.setdefault(card, [])
+        entry = (label, overdue)
+        if entry not in labels:
+            labels.append(entry)
+
+    def _status_rank(lst):
+        if "已完成" in lst: return 2
+        if "執行中" in lst: return 1
+        if "未執行" in lst: return 0
+        return 3
+
+    return tuple(
+        (
+            board,
+            tuple(
+                (lst, tuple((card, tuple(labels)) for card, labels in cards.items()))
+                for lst, cards in sorted(cols.items(), key=lambda kv: (_status_rank(kv[0]), kv[0]))
+            ),
+        )
+        for board, cols in tree.items()
+    )
+
+
 def run_checks():
     """單一每日批次：一次評估全部觸發條件（#1–#9），回傳 (uid, board_name, rec) 清單。
     主管(internal)額外得每日摘要與可操作確認卡。交付（push 過濾 / on-demand 拉取）由呼叫端決定。"""
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
+    from collections import defaultdict
     contacts = load_contacts()
     internal = _internal_recipients()  # 所有管理者/員工 — #3–#7、#9 內部收件人
+    internal_set = {u for u in internal if u}
     label_map = _all_project_names()   # {board_id: 對外 public_label}（去 PII）
     boards_data = _scan_boards()       # 並行批次 + TTL 快取（取代逐看板循序抓取）
     notifications = []
-    summary_items = []
+    # #9 進行中摘要改 per-recipient：主管(internal)看可見全部、廠商看自己被 tag 的（窗口內）
+    summary_by_uid = defaultdict(list)
 
     for board in boards_data:
         # 對外顯示一律用 public_label，不顯示 Trello 看板原名（含屋主名）
@@ -543,10 +577,12 @@ def run_checks():
                     names, start, end, end_time, label = parsed
                     if not label:
                         label = card["name"]
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, internal, is_complete=is_complete,
+                    sponsors = check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, internal, is_complete=is_complete,
                                board_id=board["id"], card_id=card["id"], checkitem_id=None, source="card")
                     if _in_summary(start, end, is_complete):
-                        summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
+                        overdue = _summary_overdue(start, end)
+                        for uid in (set(sponsors) | internal_set):
+                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue))
 
             for checklist in card.get("checklists", []):
                 items = checklist.get("checkItems", [])
@@ -561,10 +597,12 @@ def run_checks():
                     if not is_complete:
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
-                    check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, internal, is_complete=is_complete,
+                    sponsors = check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, internal, is_complete=is_complete,
                                board_id=board["id"], card_id=card["id"], checkitem_id=item["id"], source="checklist")
                     if _in_summary(start, end, is_complete):
-                        summary_items.append((board_name, list_name, card["name"], label, _summary_overdue(start, end)))
+                        overdue = _summary_overdue(start, end)
+                        for uid in (set(sponsors) | internal_set):
+                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue))
 
                 if not has_tag:
                     continue
@@ -597,34 +635,9 @@ def run_checks():
             if card_has_check and card_all_complete and "已完成" not in list_name:
                 _complete_unfiled.append(f"{board_name}/{card['name']}")
 
-    # #9 每日摘要（內部）— 結構化資料，由 build_flex 以與專案提醒同款的 bubble 呈現
+    # #9 每日摘要（per-recipient）— 沿用 ±7 補完窗口判定；主管(internal)看可見範圍全部、
+    # 廠商看自己被 tag 的窗口內工項。警告（未對應 alias／完成未歸欄）僅附主管。
     now_str = datetime.now(TAIPEI).strftime("%Y/%m/%d")
-    # 巢狀結構：board → 狀態欄(list_name) → 卡片 → [工項]；收斂同卡重複、同工項去重
-    from collections import OrderedDict
-    tree = OrderedDict()
-    for board, lst, card, label, overdue in summary_items:
-        cards = tree.setdefault(board, OrderedDict()).setdefault(lst, OrderedDict())
-        labels = cards.setdefault(card, [])
-        entry = (label, overdue)
-        if entry not in labels:
-            labels.append(entry)
-
-    def _status_rank(lst):
-        if "已完成" in lst: return 2
-        if "執行中" in lst: return 1
-        if "未執行" in lst: return 0
-        return 3
-
-    sections = tuple(
-        (
-            board,
-            tuple(
-                (lst, tuple((card, tuple(labels)) for card, labels in cards.items()))
-                for lst, cards in sorted(cols.items(), key=lambda kv: (_status_rank(kv[0]), kv[0]))
-            ),
-        )
-        for board, cols in tree.items()
-    )
     # warnings: ((標題, (行,...)),...)，各自一張 bubble（用 tuple 以保持 rec 可 hash 供去重）
     warnings = []
     if _unresolved_aliases:
@@ -641,14 +654,14 @@ def run_checks():
         warnings.append(("⚠️ 查無對應 LINE 帳號（未發送通知）", tuple(wlines)))
     if _complete_unfiled:
         warnings.append(("✅ 已完成但未歸『已完成』欄（請移動卡片）", tuple(f"・{s}" for s in _complete_unfiled)))
-    summary_rec = ("summary", now_str, sections, tuple(warnings))
-    # 摘要僅在有實際內容時附給內部（空摘要不佔 bubble；無內容主管→拉取時回「今日無提醒」）
-    has_summary = bool(sections or warnings)
-    for uid in internal:
-        if not uid:
-            continue
-        if has_summary:
-            notifications.append((uid, "__summary__", summary_rec))
+    warnings = tuple(warnings)
+
+    # 每個收件人一則 summary rec；空 sections 且無警告者不附（維持 skip-empty）
+    for uid in (set(summary_by_uid.keys()) | internal_set):
+        sections = _summary_sections(summary_by_uid.get(uid, []))
+        w = warnings if uid in internal_set else ()
+        if sections or w:
+            notifications.append((uid, "__summary__", ("summary", now_str, sections, w)))
 
     # 待主管確認 → 每筆一張可操作確認卡（取代舊摘要內的純文字清單）。
     # rec = ("confirm", cid, 專案名, 卡片名, label, who, act)
@@ -820,19 +833,23 @@ def build_flex(items, mode_label, show_buttons=True):
                 col_block = []
                 for card, labels in cards:
                     lines = []
+                    show_card = False   # card 層級工項（label 預設為卡片名）→ 以卡片名 header 呈現
                     for lb, overdue in labels:
                         if (card, lb) in upper_labels:
                             continue  # 已在上段 → 去重
-                        if lb == card and not overdue:
-                            continue  # label 等於卡片名且未逾期 → 不重列
                         if lb == card:
-                            txt, col = "⚠️ 逾期", "#D32F2F"
-                        elif overdue:
+                            # card desc tag 未填 label（label 預設為卡片名）→ 用 header 呈現，
+                            # 不再因「未逾期」而略過（否則像 70.封板 這種進行中卡會消失）
+                            show_card = True
+                            if overdue:
+                                lines.append({"type": "text", "text": "・⚠️ 逾期", "size": "xs", "color": "#D32F2F", "wrap": True, "margin": "xs"})
+                            continue
+                        if overdue:
                             txt, col = f"⚠️ {lb}（逾期）", "#D32F2F"
                         else:
                             txt, col = lb, "#666666"
                         lines.append({"type": "text", "text": f"・{txt}", "size": "xs", "color": col, "wrap": True, "margin": "xs"})
-                    if lines:
+                    if lines or show_card:
                         col_block.append({"type": "text", "text": card, "size": "sm", "weight": "bold", "color": "#1A1A1A", "wrap": True, "margin": "md"})
                         col_block.extend(lines)
                 if col_block:
