@@ -911,7 +911,8 @@ def _someday_entry_bubble(is_today, empty):
                    "min": (today - timedelta(days=365)).isoformat(),
                    "max": (today + timedelta(days=365)).isoformat()},
     })
-    return {"type": "bubble", "size": "kilo",
+    # size 必須與內容 bubble（mega）一致——LINE carousel 不允許混用不同 bubble size
+    return {"type": "bubble", "size": "mega",
             "body": {"type": "box", "layout": "vertical", "contents": body}}
 
 
