@@ -893,24 +893,15 @@ def test_send():
 DAILY_LABEL = "今日"
 
 
-def _someday_entry_bubble(is_today, empty):
-    """datetimepicker「查其他日期」入口（someday）。空內容訊息與唯讀推算註記一併放此。
-    範圍限今日 ±365 天。"""
-    today = date.today()
+def _someday_note_bubble(ref, empty):
+    """someday 投影揭示（無按鈕）。空內容時併「該日無提醒」。
+    指定日期入口已改由 Rich Menu「查其他日期」提供，內容不再放 datetimepicker 按鈕。"""
     body = []
     if empty:
-        body.append({"type": "text", "text": ("今日無提醒" if is_today else "該日無提醒"),
+        body.append({"type": "text", "text": f"{ref.strftime('%Y/%m/%d')} 無提醒",
                      "size": "sm", "color": "#666666", "wrap": True})
-    if not is_today:
-        body.append({"type": "text", "text": "※ 依目前進度推算（非歷史）", "size": "xs",
-                     "color": "#AAAAAA", "wrap": True, "margin": ("sm" if body else "none")})
-    body.append({
-        "type": "button", "style": "secondary", "height": "sm", "margin": ("lg" if body else "none"),
-        "action": {"type": "datetimepicker", "label": "📅 查其他日期", "data": "o=someday",
-                   "mode": "date", "initial": today.isoformat(),
-                   "min": (today - timedelta(days=365)).isoformat(),
-                   "max": (today + timedelta(days=365)).isoformat()},
-    })
+    body.append({"type": "text", "text": "※ 依目前進度推算（非歷史）", "size": "xs",
+                 "color": "#AAAAAA", "wrap": True, "margin": ("sm" if empty else "none")})
     # size 必須與內容 bubble（mega）一致——LINE carousel 不允許混用不同 bubble size
     return {"type": "bubble", "size": "mega",
             "body": {"type": "box", "layout": "vertical", "contents": body}}
@@ -918,9 +909,9 @@ def _someday_entry_bubble(is_today, empty):
 
 def build_daily_messages_for_user(user_id, role=None, as_of=None):
     """組裝某使用者的每日內容（on-demand 拉取共用）。回傳 LINE message 物件陣列。
-    as_of 預設今日；傳入選定日 → someday 提醒（投影、唯讀、標頭顯示該日）。內容定義與每日批次
-    一致：跑 run_checks(as_of) 後過濾出該 uid 的項目。一律追加「📅 查其他日期」datetimepicker
-    入口；空內容也回覆該入口（不回空陣列）。"""
+    as_of 預設今日；傳入選定日 → someday 提醒（投影、唯讀、標頭顯示該日 + 推算註記）。內容定義
+    與每日批次一致：跑 run_checks(as_of) 後過濾出該 uid 的項目。指定日期入口由 Rich Menu 提供，
+    內容不再放 datetimepicker 按鈕。今日無內容回 []（呼叫端回文字）；someday 無內容回推算註記。"""
     today = date.today()
     is_today = (as_of is None or as_of == today)
     ref = today if as_of is None else as_of
@@ -929,14 +920,17 @@ def build_daily_messages_for_user(user_id, role=None, as_of=None):
     mode_label = DAILY_LABEL if is_today else ref.strftime("%Y/%m/%d")
     # ✅完成 按鈕只給 vendor/customer（不能碰 Trello）且僅今日；someday 為投影 → 唯讀
     show_buttons = is_today and role in ("vendor", "customer")
-    entry = _someday_entry_bubble(is_today, empty=not items)
-    if items:
-        contents = build_flex(items, mode_label, show_buttons=show_buttons)
-        bubbles = contents["contents"] if contents.get("type") == "carousel" else [contents]
-        bubbles = bubbles[:11] + [entry]   # 保留入口按鈕於最後（carousel 上限 12）
+    if not items:
+        if is_today:
+            return []   # 今日無提醒 → 交呼叫端回文字
+        contents = _someday_note_bubble(ref, empty=True)
+        return [{"type": "flex", "altText": f"意念情境 {mode_label}提醒（0 則）", "contents": contents}]
+    contents = build_flex(items, mode_label, show_buttons=show_buttons)
+    if not is_today:
+        # someday 附「依目前進度推算」揭示（無按鈕）
+        note = _someday_note_bubble(ref, empty=False)
+        bubbles = (contents["contents"] if contents.get("type") == "carousel" else [contents])[:11] + [note]
         contents = bubbles[0] if len(bubbles) == 1 else {"type": "carousel", "contents": bubbles}
-    else:
-        contents = entry
     alt = f"意念情境 {mode_label}提醒（{len(items)} 則）"
     return [{"type": "flex", "altText": alt[:400], "contents": contents}]
 
