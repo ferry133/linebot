@@ -327,8 +327,9 @@ def parse_tag(text):
     return names, start, end, end_time, label
 
 
-def days_diff(d):
-    return (d - date.today()).days
+def days_diff(d, ref=None):
+    """d 與基準日的天數差。ref 預設今日；someday 提醒傳入選定日以投影計算。"""
+    return (d - (ref or date.today())).days
 
 
 def _summary_window(start, end):
@@ -348,21 +349,22 @@ def _summary_window(start, end):
     return None, None
 
 
-def _in_summary(start, end, is_complete) -> bool:
-    """#9 每日摘要納入條件：尚未完成，且今天已到補完窗口的起點（今天 >= 補出的 start）。
+def _in_summary(start, end, is_complete, as_of=None) -> bool:
+    """#9 每日摘要納入條件：尚未完成，且基準日已到補完窗口的起點（基準日 >= 補出的 start）。
 
-    無上界：逾期未完成的工項持續顯示，直到打勾完成。未來（今天 < start）與已完成→排除。
+    無上界：逾期未完成的工項持續顯示，直到打勾完成。未來（基準日 < start）與已完成→排除。
+    as_of 預設今日；someday 傳入選定日。
     """
     if is_complete:
         return False
     ns, _ = _summary_window(start, end)
-    return ns is not None and days_diff(ns) <= 0
+    return ns is not None and days_diff(ns, as_of) <= 0
 
 
-def _summary_overdue(start, end) -> bool:
-    """今天已過補完窗口的終點（今天 > 補出的 end）→ 在摘要標「逾期」。"""
+def _summary_overdue(start, end, as_of=None) -> bool:
+    """基準日已過補完窗口的終點（基準日 > 補出的 end）→ 在摘要標「逾期」。"""
     _, ne = _summary_window(start, end)
-    return ne is not None and days_diff(ne) < 0
+    return ne is not None and days_diff(ne, as_of) < 0
 
 
 def fmt_item(list_name, card_name, body):
@@ -371,7 +373,10 @@ def fmt_item(list_name, card_name, body):
 
 
 def check_item(names, start, end, end_time, label, contacts, board_name, list_name, card_name, raw, notifications, internal, is_complete: bool = False,
-               board_id="", card_id="", checkitem_id=None, source="card"):
+               board_id="", card_id="", checkitem_id=None, source="card", as_of=None):
+    # as_of 預設今日；someday 提醒傳入選定日 → 所有日期條件相對該日投影計算。
+    def dd(x):
+        return days_diff(x, as_of)
     # 已完成工項不累積「查無對應 LINE 帳號」警告（已完成者不需提醒補帳號）
     sponsors = _resolve_tag_recipients(names, source=f"{board_name}/{card_name}", record_unresolved=not is_complete) or [contacts[n] for n in names if n in contacts]
     sub = f"{list_name}/{card_name}"
@@ -388,22 +393,22 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
 
     # 單一每日批次：一次評估全部觸發條件（原 morning/noon/evening 合併）。
     # #2 今日開始
-    if start and days_diff(start) == 0:
+    if start and dd(start) == 0:
         add(sponsors, "今日開始", "#388E3C")
     # #1 開始倒數（1–7 天後）
-    if start and 1 <= days_diff(start) <= 7:
-        add(sponsors, f"{days_diff(start)} 天後開始", "#1976D2")
+    if start and 1 <= dd(start) <= 7:
+        add(sponsors, f"{dd(start)} 天後開始", "#1976D2")
     # #4 今日到期（#5「今日時間已過」在清晨每日批次視為惰性，由本條涵蓋）
-    if active and end and days_diff(end) == 0:
+    if active and end and dd(end) == 0:
         time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
         add(set(sponsors + internal), f"今日{time_str}到期", "#D32F2F")
     # #3 結束倒數（1–7 天內）
-    if active and end and 1 <= days_diff(end) <= 7:
-        d = days_diff(end)
+    if active and end and 1 <= dd(end) <= 7:
+        d = dd(end)
         add(set(sponsors + internal), f"{d} 天內到期", _due_color(d))
     # #6 已逾期（所有執行日皆呈現；批次排程 Sun–Fri，週六不跑）
-    if active and end and days_diff(end) < 0:
-        add(set(sponsors + internal), f"已逾期 {abs(days_diff(end))} 天", "#B71C1C")
+    if active and end and dd(end) < 0:
+        add(set(sponsors + internal), f"已逾期 {abs(dd(end))} 天", "#B71C1C")
     return sponsors
 
 
@@ -542,9 +547,11 @@ def _summary_sections(items_list):
     )
 
 
-def run_checks():
+def run_checks(as_of=None):
     """單一每日批次：一次評估全部觸發條件（#1–#9），回傳 (uid, board_name, rec) 清單。
-    主管(internal)額外得每日摘要與可操作確認卡。交付（push 過濾 / on-demand 拉取）由呼叫端決定。"""
+    主管(internal)額外得每日摘要與可操作確認卡。交付（push 過濾 / on-demand 拉取）由呼叫端決定。
+    as_of 預設今日；someday 提醒傳入選定日 → 以目前 Trello 進度、選定日日曆投影計算（非歷史）。"""
+    as_of = as_of or date.today()
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
     from collections import defaultdict
@@ -579,9 +586,9 @@ def run_checks():
                     if not label:
                         label = card["name"]
                     sponsors = check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, internal, is_complete=is_complete,
-                               board_id=board["id"], card_id=card["id"], checkitem_id=None, source="card")
-                    if _in_summary(start, end, is_complete):
-                        overdue = _summary_overdue(start, end)
+                               board_id=board["id"], card_id=card["id"], checkitem_id=None, source="card", as_of=as_of)
+                    if _in_summary(start, end, is_complete, as_of):
+                        overdue = _summary_overdue(start, end, as_of)
                         for uid in (set(sponsors) | internal_set):
                             summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue, first_line.strip()))
 
@@ -599,20 +606,20 @@ def run_checks():
                         card_all_complete = False
                     names, start, end, end_time, label = parsed
                     sponsors = check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, internal, is_complete=is_complete,
-                               board_id=board["id"], card_id=card["id"], checkitem_id=item["id"], source="checklist")
-                    if _in_summary(start, end, is_complete):
-                        overdue = _summary_overdue(start, end)
+                               board_id=board["id"], card_id=card["id"], checkitem_id=item["id"], source="checklist", as_of=as_of)
+                    if _in_summary(start, end, is_complete, as_of):
+                        overdue = _summary_overdue(start, end, as_of)
                         for uid in (set(sponsors) | internal_set):
                             summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue, item["name"].strip()))
 
                 if not has_tag:
                     continue
 
-                # #7 停滯（內部）
+                # #7 停滯（內部）— 停滯天數相對基準日（someday 投影）
                 last_activity = card.get("dateLastActivity")
                 if last_activity:
                     last_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
-                    days_stale = (datetime.now(TAIPEI) - last_dt.astimezone(TAIPEI)).days
+                    days_stale = (as_of - last_dt.astimezone(TAIPEI).date()).days
                     incomplete = [i for i in items if i["state"] == "incomplete"]
                     if incomplete and days_stale >= 3:
                         rec = ("item", "#EF6C00", f"已停滯 {days_stale} 天，請追蹤", f"{list_name}/{card['name']}", "", "", "", None, "card", "")
@@ -638,7 +645,7 @@ def run_checks():
 
     # #9 每日摘要（per-recipient）— 沿用 ±7 補完窗口判定；主管(internal)看可見範圍全部、
     # 廠商看自己被 tag 的窗口內工項。警告（未對應 alias／完成未歸欄）僅附主管。
-    now_str = datetime.now(TAIPEI).strftime("%Y/%m/%d")
+    now_str = as_of.strftime("%Y/%m/%d")   # 標頭日期＝基準日（someday 顯示選定日）
     # warnings: ((標題, (行,...)),...)，各自一張 bubble（用 tuple 以保持 rec 可 hash 供去重）
     warnings = []
     if _unresolved_aliases:
@@ -886,18 +893,50 @@ def test_send():
 DAILY_LABEL = "今日"
 
 
-def build_daily_messages_for_user(user_id, role=None):
-    """組裝某使用者的每日內容（on-demand 拉取共用）。回傳 LINE message 物件陣列，
-    無內容回 []。內容定義與每日批次一致：跑 run_checks() 後過濾出該 uid 的項目；
-    主管(internal) 因 run_checks 已附其摘要與確認卡，過濾後即包含。"""
-    notifications = run_checks()
+def _someday_entry_bubble(is_today, empty):
+    """datetimepicker「查其他日期」入口（someday）。空內容訊息與唯讀推算註記一併放此。
+    範圍限今日 ±365 天。"""
+    today = date.today()
+    body = []
+    if empty:
+        body.append({"type": "text", "text": ("今日無提醒" if is_today else "該日無提醒"),
+                     "size": "sm", "color": "#666666", "wrap": True})
+    if not is_today:
+        body.append({"type": "text", "text": "※ 依目前進度推算（非歷史）", "size": "xs",
+                     "color": "#AAAAAA", "wrap": True, "margin": ("sm" if body else "none")})
+    body.append({
+        "type": "button", "style": "secondary", "height": "sm", "margin": ("lg" if body else "none"),
+        "action": {"type": "datetimepicker", "label": "📅 查其他日期", "data": "o=someday",
+                   "mode": "date", "initial": today.isoformat(),
+                   "min": (today - timedelta(days=365)).isoformat(),
+                   "max": (today + timedelta(days=365)).isoformat()},
+    })
+    return {"type": "bubble", "size": "kilo",
+            "body": {"type": "box", "layout": "vertical", "contents": body}}
+
+
+def build_daily_messages_for_user(user_id, role=None, as_of=None):
+    """組裝某使用者的每日內容（on-demand 拉取共用）。回傳 LINE message 物件陣列。
+    as_of 預設今日；傳入選定日 → someday 提醒（投影、唯讀、標頭顯示該日）。內容定義與每日批次
+    一致：跑 run_checks(as_of) 後過濾出該 uid 的項目。一律追加「📅 查其他日期」datetimepicker
+    入口；空內容也回覆該入口（不回空陣列）。"""
+    today = date.today()
+    is_today = (as_of is None or as_of == today)
+    ref = today if as_of is None else as_of
+    notifications = run_checks(as_of=ref)
     items = [(board_name, rec) for uid, board_name, rec in notifications if uid == user_id]
-    if not items:
-        return []
-    # ✅完成 按鈕只給 vendor/customer（不能碰 Trello）；admin/employee 用 Trello，不顯示
-    show_buttons = role in ("vendor", "customer")
-    contents = build_flex(items, DAILY_LABEL, show_buttons=show_buttons)
-    alt = f"意念情境 {DAILY_LABEL}提醒（{len(items)} 則）"
+    mode_label = DAILY_LABEL if is_today else ref.strftime("%Y/%m/%d")
+    # ✅完成 按鈕只給 vendor/customer（不能碰 Trello）且僅今日；someday 為投影 → 唯讀
+    show_buttons = is_today and role in ("vendor", "customer")
+    entry = _someday_entry_bubble(is_today, empty=not items)
+    if items:
+        contents = build_flex(items, mode_label, show_buttons=show_buttons)
+        bubbles = contents["contents"] if contents.get("type") == "carousel" else [contents]
+        bubbles = bubbles[:11] + [entry]   # 保留入口按鈕於最後（carousel 上限 12）
+        contents = bubbles[0] if len(bubbles) == 1 else {"type": "carousel", "contents": bubbles}
+    else:
+        contents = entry
+    alt = f"意念情境 {mode_label}提醒（{len(items)} 則）"
     return [{"type": "flex", "altText": alt[:400], "contents": contents}]
 
 

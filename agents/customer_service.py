@@ -17,7 +17,7 @@ import os
 import re
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 
 _FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 
@@ -565,16 +565,23 @@ class CustomerServiceAgent:
             "user_id": user_id, "messages": msgs, "reply_token": reply_token,
         })
 
-    def _handle_daily(self, user_id: str, reply_token: str | None):
+    def _handle_daily(self, user_id: str, reply_token: str | None, as_of=None):
         """Rich Menu「今日提醒」on-demand 拉取：組裝該使用者角色對應的每日內容，
         經 Reply API 回覆（免費）。supervisor 另含每日摘要與可操作確認卡。
-        無內容時一律回覆「今日無提醒」。"""
+        as_of（datetimepicker 選定日 'YYYY-MM-DD'）帶入 → someday 提醒（投影、唯讀）；
+        缺值/格式錯 → 回退今日。內容一律含「查其他日期」入口。"""
         _display, _alias, role = self._user_identity(user_id)
+        target = None
+        if as_of:
+            try:
+                target = date.fromisoformat(as_of)
+            except Exception:
+                target = None   # 格式錯 → 回退今日
         try:
-            msgs = build_daily_messages_for_user(user_id, role)
+            msgs = build_daily_messages_for_user(user_id, role, as_of=target)
         except Exception as e:
             log.exception(f"[{AGENT_ID}] build daily content failed for {user_id[:8]}: {e}")
-            self._reply(user_id, "目前無法取得今日提醒，請稍後再試。", reply_token)
+            self._reply(user_id, "目前無法取得提醒，請稍後再試。", reply_token)
             return
         if not msgs:
             self._reply(user_id, "今日無提醒。", reply_token)
@@ -640,6 +647,9 @@ class CustomerServiceAgent:
                 self._handle_guide(user_id, reply_token, pb)
             elif op == "daily":
                 self._handle_daily(user_id, reply_token)
+            elif op == "someday":
+                # datetimepicker 指定日期 → 該日提醒（投影）；date 由 gateway 從 params 併入
+                self._handle_daily(user_id, reply_token, as_of=pb.get("date"))
             else:
                 self._reply(user_id, "未知動作。", reply_token)
         except Exception as e:
