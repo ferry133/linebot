@@ -185,6 +185,10 @@ def webhook():
             pb = _parse_postback(event.get("postback", {}).get("data", ""))
             if not pb:
                 continue
+            # datetimepicker（如 o=someday）：選定值在 postback.params，不在 data → 併入 pb
+            _params = event.get("postback", {}).get("params") or {}
+            if _params.get("date"):
+                pb["date"] = _params["date"]
             threading.Thread(target=_upsert_line_user, args=(user_id,), daemon=True).start()
             broker.publish(INBOX_TOPIC, {
                 "user_id": user_id,
