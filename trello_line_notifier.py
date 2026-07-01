@@ -771,12 +771,6 @@ def build_flex(items, mode_label, show_buttons=True):
             board_order.append(board_name)
         by_board[board_name].append(rec)
 
-    def _status_color(lst):
-        if "已完成" in lst: return "#388E3C"   # 綠
-        if "執行中" in lst: return "#EF6C00"   # 橙
-        if "未執行" in lst: return "#1976D2"   # 藍
-        return "#666666"
-
     def _summary_bubble(now_str, title, body, title_color="#1A1A1A"):
         return {
             "type": "bubble", "size": "mega",
@@ -826,43 +820,34 @@ def build_flex(items, mode_label, show_buttons=True):
             body.append(box)
 
         # 下段：該看板其餘進行中工項（摘要窗口，去重上段，無按鈕）
+        # 格式對齊上段「?天內到期」：彩色抬頭 + 灰路徑(list/card) + 深色內文(label)
         columns = summary_by_board.get(board)
         if columns:
-            lower = []
+            lower_boxes = []
             for lst, cards in columns:
-                col_block = []
                 for card, labels in cards:
-                    lines = []
-                    show_card = False   # card 層級工項（label 預設為卡片名）→ 以卡片名 header 呈現
                     for lb, overdue in labels:
                         if (card, lb) in upper_labels:
                             continue  # 已在上段 → 去重
-                        if lb == card:
-                            # card desc tag 未填 label（label 預設為卡片名）→ 用 header 呈現，
-                            # 不再因「未逾期」而略過（否則像 70.封板 這種進行中卡會消失）
-                            show_card = True
-                            if overdue:
-                                lines.append({"type": "text", "text": "・⚠️ 逾期", "size": "xs", "color": "#D32F2F", "wrap": True, "margin": "xs"})
-                            continue
-                        if overdue:
-                            txt, col = f"⚠️ {lb}（逾期）", "#D32F2F"
-                        else:
-                            txt, col = lb, "#666666"
-                        lines.append({"type": "text", "text": f"・{txt}", "size": "xs", "color": col, "wrap": True, "margin": "xs"})
-                    if lines or show_card:
-                        col_block.append({"type": "text", "text": card, "size": "sm", "weight": "bold", "color": "#1A1A1A", "wrap": True, "margin": "md"})
-                        col_block.extend(lines)
-                if col_block:
-                    if lower:
-                        lower.append({"type": "separator", "margin": "lg"})
-                    lower.append({"type": "text", "text": lst, "weight": "bold", "size": "sm",
-                                  "color": _status_color(lst), "wrap": True, "margin": "lg"})
-                    lower.extend(col_block)
-            if lower:
+                        headline = "已逾期" if overdue else "進行中"
+                        color = "#B71C1C" if overdue else "#EF6C00"
+                        blk = [
+                            {"type": "text", "text": headline, "weight": "bold", "color": color, "size": "md", "wrap": True},
+                            {"type": "text", "text": f"{lst}/{card}", "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
+                        ]
+                        # card 層級（label 預設為卡片名）→ 路徑已含卡片名，不再重複內文
+                        if lb != card:
+                            blk.append({"type": "text", "text": lb, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
+                        lower_boxes.append(blk)
+            if lower_boxes:
                 if body:
                     body.append({"type": "separator", "margin": "xl"})
                 body.append({"type": "text", "text": "其餘進行中工項", "size": "xs", "color": "#AAAAAA", "wrap": True, "margin": "md"})
-                body.extend(lower)
+                for j, blk in enumerate(lower_boxes):
+                    box = {"type": "box", "layout": "vertical", "contents": blk, "margin": ("lg" if j > 0 else "md")}
+                    if j > 0:
+                        body.append({"type": "separator", "margin": "lg"})
+                    body.append(box)
 
         if not body:
             continue
