@@ -58,6 +58,35 @@ DAILY_KEYWORDS = {
     "今日專案提醒", "今天專案提醒",
 }
 
+# 「未來工項」文字備援：解析「未來/過去 + 2週/1月/2月/3月」→ (direction, days)，繞過 Claude
+# 支援阿拉伯與中文數字（如「未來二月工項」）；純「未來/過去(工項)」→ 預設 1 月(30)。
+_FUTURE_DIR = {"未來": "future", "未来": "future", "過去": "past", "过去": "past"}
+_CJK_NUM = {"一": 1, "二": 2, "三": 3, "兩": 2, "两": 2}
+
+
+def _parse_future_keyword(text: str):
+    t = (text or "").strip()
+    for suf in ("的工項", "工項", "工程", "提醒", "清單", "查詢"):
+        if t.endswith(suf):
+            t = t[: -len(suf)].strip()
+    direction = rest = None
+    for pref, d in _FUTURE_DIR.items():
+        if t.startswith(pref):
+            direction, rest = d, t[len(pref):].strip()
+            break
+    if direction is None:
+        return None
+    if not rest:
+        return (direction, 30)   # 未來/過去 → 預設 1 月
+    m = re.match(r"^(\d+|[一二三兩两])\s*(週|周|個月|个月|月)$", rest)
+    if not m:
+        return None
+    num = int(m.group(1)) if m.group(1).isdigit() else _CJK_NUM.get(m.group(1), 0)
+    days = num * 7 if m.group(2) in ("週", "周") else num * 30
+    if days not in (14, 30, 60, 90):
+        days = 30                # 非預設視窗 → 回退 1 月
+    return (direction, days)
+
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
 MAX_TOKENS = 2048
@@ -263,6 +292,12 @@ class CustomerServiceAgent:
         if text.strip() in DAILY_KEYWORDS:
             log.info(f"[{AGENT_ID}] Daily keyword from {user_id[:8]}")
             threading.Thread(target=self._handle_daily, args=(user_id, reply_token), daemon=True).start()
+            return
+        # 關鍵字「未來/過去 N 工項」備援入口 → 走 o=future 同一份清單（非走 Claude 文字）
+        _fut = _parse_future_keyword(text)
+        if _fut:
+            log.info(f"[{AGENT_ID}] Future keyword from {user_id[:8]}: {_fut}")
+            threading.Thread(target=self._handle_future, args=(user_id, reply_token, _fut[0], _fut[1]), daemon=True).start()
             return
         log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
