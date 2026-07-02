@@ -16,7 +16,7 @@
 ## 3. Rich Menu
 
 - [x] 3.1 `setup_richmenu.py`：中間格 label「未來工項」、action `postback o=future`；重繪底圖（時間軸/月曆圖示）
-- [ ] 3.2 `--preview` 出圖確認後，安全序部署（建新+設預設→刪舊）
+- [x] 3.2 `--preview` 出圖確認後，安全序部署（建新+設預設→刪舊）
 
 ## 4. 驗證
 
@@ -27,5 +27,5 @@
 
 ## 5. 部署
 
-- [ ] 5.1 bump image（gateway + customer-service + notifier 同 image）
-- [ ] 5.2 部署後實機：Rich Menu「未來工項」→ 區間清單 + quick-reply；指定日期 → someday
+- [x] 5.1 bump image（gateway + customer-service + notifier 同 image）
+- [x] 5.2 部署後實機：Rich Menu「未來工項」→ 區間清單 + quick-reply；指定日期 → someday
