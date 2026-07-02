@@ -935,6 +935,117 @@ def build_daily_messages_for_user(user_id, role=None, as_of=None):
     return [{"type": "flex", "altText": alt[:400], "contents": contents}]
 
 
+# ─── 未來工項（區間清單）──────────────────────────────────────
+FUTURE_WINDOWS = [("2週", 14), ("1月", 30), ("2月", 60), ("3月", 90)]
+FUTURE_DEFAULT_DAYS = 30      # Rich Menu 一級入口預設：未來 1 月
+_FUTURE_MAX_EVENTS = 40       # 單則上限，避免 Flex 過大
+
+
+def _future_quick_reply():
+    """未來×4 + 過去×4 視窗切換 + 「指定日期」單日(datetimepicker o=someday)。"""
+    items = []
+    for dkey, dlabel in (("f", "未來"), ("p", "過去")):
+        for wlabel, days in FUTURE_WINDOWS:
+            items.append({"type": "action", "action": {
+                "type": "postback", "label": f"{dlabel}{wlabel}",
+                "data": f"o=future&dir={dkey}&n={days}", "displayText": f"{dlabel}{wlabel}工項"}})
+    items.append({"type": "action", "action": {
+        "type": "datetimepicker", "label": "📅 指定日期", "data": "o=someday", "mode": "date"}})
+    return {"items": items}
+
+
+def build_future_messages_for_user(direction, days, allowed_board_ids, owner_alias):
+    """未來/過去區間工項清單（on-demand）。RBAC 由呼叫端以既有 _get_user_auth 算好
+    allowed_board_ids（None=不限、[]=封鎖、[ids]=限定）+ owner_alias（vendor=自身、其餘 None）傳入。
+    列未完成、有 [@] tag、start 或 end 落在區間的工項，依日期升序、標開始/到期。唯讀、投影。"""
+    days = days if days in (d for _, d in FUTURE_WINDOWS) else FUTURE_DEFAULT_DAYS
+    direction = "past" if direction == "past" else "future"
+    today = date.today()
+    if direction == "future":
+        lo, hi, dir_label = today, today + timedelta(days=days), "未來"
+    else:
+        lo, hi, dir_label = today - timedelta(days=days), today, "過去"
+    win_label = next((w for w, d in FUTURE_WINDOWS if d == days), f"{days}天")
+    title = f"{dir_label}{win_label}工項"
+    qr = _future_quick_reply()
+
+    allowed = set(allowed_board_ids) if allowed_board_ids is not None else None
+    oa = owner_alias or None
+    label_map = _all_project_names()
+    events = []  # (event_date, kind, public_label, card_name, item_label)
+
+    def _consider(names, start, end, label, is_complete, public, card_name):
+        if is_complete:
+            return
+        if oa is not None and oa not in [n.lower() for n in names]:
+            return
+        lbl = label or card_name
+        if start and lo <= start <= hi:
+            events.append((start, "開始", public, card_name, lbl))
+        if end and lo <= end <= hi:
+            events.append((end, "到期", public, card_name, lbl))
+
+    for board in _scan_boards():
+        if allowed is not None and board["id"] not in allowed:
+            continue
+        public = label_map.get(board["id"]) or "（未登錄專案）"
+        for card in board["cards"]:
+            if card.get("desc"):
+                p = parse_tag(card["desc"].split("\n")[0])
+                if p:
+                    names, start, end, _et, label = p
+                    _consider(names, start, end, label, bool(card.get("dueComplete")), public, card["name"])
+            for cl in card.get("checklists", []):
+                for it in cl.get("checkItems", []):
+                    p = parse_tag(it["name"])
+                    if not p:
+                        continue
+                    names, start, end, _et, label = p
+                    _consider(names, start, end, label, it.get("state") == "complete", public, card["name"])
+
+    events.sort(key=lambda e: e[0])
+    truncated = len(events) > _FUTURE_MAX_EVENTS
+    events = events[:_FUTURE_MAX_EVENTS]
+
+    if not events:
+        bubble = {"type": "bubble", "size": "mega", "body": {"type": "box", "layout": "vertical", "contents": [
+            {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A"},
+            {"type": "text", "text": f"{dir_label} {win_label}內無工項", "size": "sm", "color": "#666666", "margin": "md", "wrap": True},
+            {"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA", "margin": "sm"},
+        ]}}
+        return [{"type": "flex", "altText": f"意念情境 {title}（0）", "contents": bubble, "quickReply": qr}]
+
+    from collections import OrderedDict
+    by_date = OrderedDict()
+    for edate, kind, public, card_name, lbl in events:
+        by_date.setdefault(edate, []).append((kind, public, card_name, lbl))
+
+    body = [
+        {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A"},
+        {"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA", "margin": "xs"},
+    ]
+    kind_color = {"開始": "#1976D2", "到期": "#D32F2F"}
+    for edate, evs in by_date.items():
+        wd = "日一二三四五六"[int(edate.strftime("%w"))]
+        body.append({"type": "separator", "margin": "lg"})
+        body.append({"type": "text", "text": f"📅 {edate.strftime('%m/%d')}（{wd}）",
+                     "weight": "bold", "size": "sm", "color": "#333333", "margin": "lg"})
+        for kind, public, card_name, lbl in evs:
+            item_text = card_name if lbl == card_name else f"{card_name}／{lbl}"
+            body.append({"type": "box", "layout": "vertical", "margin": "sm", "contents": [
+                {"type": "text", "text": kind, "size": "xs", "weight": "bold", "color": kind_color.get(kind, "#666666")},
+                {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True},
+                {"type": "text", "text": item_text, "size": "sm", "color": "#333333", "wrap": True},
+            ]})
+    if truncated:
+        body.append({"type": "separator", "margin": "lg"})
+        body.append({"type": "text", "text": f"… 僅顯示前 {_FUTURE_MAX_EVENTS} 筆，請縮小視窗",
+                     "size": "xs", "color": "#AAAAAA", "margin": "lg", "wrap": True})
+
+    bubble = {"type": "bubble", "size": "mega", "body": {"type": "box", "layout": "vertical", "contents": body}}
+    return [{"type": "flex", "altText": f"意念情境 {title}（{len(events)} 筆）", "contents": bubble, "quickReply": qr}]
+
+
 def run_daily_push():
     """單一每日批次的主動 push：僅送 role=vendor 的收件人；空內容不送。
     主管/客戶不 push，改由 Rich Menu on-demand 拉取（免費 Reply API）取得。"""
