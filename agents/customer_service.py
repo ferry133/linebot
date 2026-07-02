@@ -37,6 +37,7 @@ from trello_line_notifier import (
     get_card, parse_tag,
     set_checkitem_state, set_card_due_complete, add_card_comment,
     build_daily_messages_for_user,
+    build_future_messages_for_user,
     public_label,
     invalidate_scan_cache,
 )
@@ -590,6 +591,25 @@ class CustomerServiceAgent:
             "user_id": user_id, "messages": msgs, "reply_token": reply_token,
         })
 
+    def _handle_future(self, user_id: str, reply_token: str | None, direction="future", days=30):
+        """Rich Menu「未來工項」on-demand：未來/過去區間工項清單（Reply）。RBAC 沿用既有
+        _get_user_auth（allowed_board_ids）+ vendor owner_alias 過濾，與對話查詢一致。唯讀、投影。"""
+        allowed_board_ids, _ = self._get_user_auth(user_id)
+        if allowed_board_ids is not None and len(allowed_board_ids) == 0:
+            self._reply(user_id, "您目前沒有工程查詢權限，如有需要請聯繫我們的服務人員。", reply_token)
+            return
+        _d, alias, role = self._user_identity(user_id)
+        owner_alias = (alias or "").lower() if role == "vendor" else None
+        try:
+            msgs = build_future_messages_for_user(direction, days, allowed_board_ids, owner_alias)
+        except Exception as e:
+            log.exception(f"[{AGENT_ID}] build future content failed for {user_id[:8]}: {e}")
+            self._reply(user_id, "目前無法取得未來工項，請稍後再試。", reply_token)
+            return
+        self.broker.publish(OUTBOX_TOPIC, {
+            "user_id": user_id, "messages": msgs, "reply_token": reply_token,
+        })
+
     def _invalidate_trello_cache(self):
         # 清 trello-agent 的掃描快取（MQTT），並清本 process 內 notifier 的掃描快取
         # （on-demand 今日提醒走 run_checks，寫入後須立即反映新狀態）。
@@ -650,6 +670,14 @@ class CustomerServiceAgent:
             elif op == "someday":
                 # datetimepicker 指定日期 → 該日提醒（投影）；date 由 gateway 從 params 併入
                 self._handle_daily(user_id, reply_token, as_of=pb.get("date"))
+            elif op == "future":
+                # 未來/過去區間工項清單；dir=f/p、n=天數（缺/非法回退未來1月）
+                direction = "past" if pb.get("dir") == "p" else "future"
+                try:
+                    days = int(pb.get("n", "30"))
+                except (TypeError, ValueError):
+                    days = 30
+                self._handle_future(user_id, reply_token, direction, days)
             else:
                 self._reply(user_id, "未知動作。", reply_token)
         except Exception as e:

@@ -2,12 +2,10 @@
 """一次性腳本：建立三格 LINE Rich Menu（今日提醒 / 查其他日期 / 使用說明）並設為預設。
 
 三格皆為底圖上的隱形點擊區：
-  左   → postback `o=daily`      → _handle_daily（今日內容，Reply＝免費）
-  中   → datetimepicker `o=someday` → 選過去/未來日 → _handle_daily(as_of)（someday 投影、唯讀）
-  右   → postback `o=guide`      → _handle_guide（依角色手冊）
-
-datetimepicker 不設 initial/min/max：Rich Menu 建立一次、值會凍結，故省略 → 每次點按
-以「當下今日」為預設，可任意選日（gateway 從 postback.params.date 取值）。
+  左   → postback `o=daily`   → _handle_daily（今日內容，Reply＝免費）
+  中   → postback `o=future`  → _handle_future（未來/過去區間工項清單；預設未來1月，
+                                quick-reply 切換方向×視窗，含「指定日期」單日 someday）
+  右   → postback `o=guide`   → _handle_guide（依角色手冊）
 
 用法（部署需 LINE_CHANNEL_ACCESS_TOKEN）：
     python gateway/setup_richmenu.py --preview out.png   # 只產底圖預覽，不需 token、不部署
@@ -40,8 +38,8 @@ THIRD = WIDTH // 3
 TILES = [
     ("#06C755", "今日提醒", "agenda",
      {"type": "postback", "data": "o=daily", "displayText": "今日提醒"}),
-    ("#2D7FF9", "查其他日期", "calendar",
-     {"type": "datetimepicker", "data": "o=someday", "mode": "date"}),
+    ("#2D7FF9", "未來工項", "calendar",
+     {"type": "postback", "data": "o=future", "displayText": "未來工項"}),
     ("#FF7A00", "使用說明", "help",
      {"type": "postback", "data": "o=guide", "displayText": "使用說明"}),
 ]
@@ -50,7 +48,7 @@ RICHMENU = {
     "size": {"width": WIDTH, "height": HEIGHT},
     "selected": True,
     "name": "main-menu-v2",
-    "chatBarText": "📋今日 📅日期 說明",  # LINE 上限 14 字元（保守收短）
+    "chatBarText": "📋今日 📅未來 說明",  # LINE 上限 14 字元（保守收短）
     "areas": [
         {"bounds": {"x": 0,         "y": 0, "width": THIRD,             "height": HEIGHT}, "action": TILES[0][3]},
         {"bounds": {"x": THIRD,     "y": 0, "width": THIRD,             "height": HEIGHT}, "action": TILES[1][3]},
