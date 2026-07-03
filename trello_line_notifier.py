@@ -73,6 +73,21 @@ def _resolve_tag_recipients(names: list[str], source: str | None = None,
     return result
 
 
+def _valid_aliases():
+    """已註冊的 `line_users.alias_name` 小寫集合（與工期表 /aliases、LINE「查無對應」同一來源）。
+    回傳 None 表 DB 不可用 → 呼叫端不過濾（graceful）。"""
+    if _db_exec is None:
+        return None
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT alias_name FROM line_users WHERE alias_name IS NOT NULL AND alias_name <> ''")
+            return {row[0].lower() for row in cur.fetchall()}
+    try:
+        return _db_exec(_q)
+    except Exception:
+        return None
+
+
 def _resolve_recipients_by_board_id(board_id: str) -> list[str]:
     """Resolve LINE IDs for all users assigned to the project with this Trello board_id."""
     if not board_id or _db_exec is None:
@@ -972,6 +987,7 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
 
     allowed = set(allowed_board_ids) if allowed_board_ids is not None else None
     oa = owner_alias or None
+    valid = _valid_aliases()   # 人員管理已註冊 alias；owner 未註冊者整筆略過（對齊工期表有效 alias）
     label_map = _all_project_names()
     tasks = []  # (public, card_name, short_label, alias, start, end, sort_date)；每任務一筆、精簡一行
 
@@ -980,6 +996,8 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
             return
         if oa is not None and oa not in [n.lower() for n in names]:
             return
+        if valid is not None and any(x.lower() not in valid for x in names):
+            return   # 有 owner 未定義在人員管理（如「木??」）→ 不出現，與工期表一致
         s_in = bool(start and lo <= start <= hi)
         e_in = bool(end and lo <= end <= hi)
         if not (s_in or e_in):          # 開始或結束落在區間才納入
@@ -1013,16 +1031,12 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     truncated = len(tasks) > _FUTURE_MAX_EVENTS
     tasks = tasks[:_FUTURE_MAX_EVENTS]
 
-    # 呈現：同款 bubble header；每張卡一個單元（合併同卡多個 tag）；每個 tag 一行
-    # 日期區間抬頭（start／end／start–end）＋原始 [@(alias),期間] tag（含 label）。
-    def _fheader():
-        return {"type": "box", "layout": "vertical", "contents": [
-            {"type": "text", "text": "意念情境・未來工項", "size": "xs", "color": "#AAAAAA"},
-            {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A", "margin": "sm"},
-        ]}
-
+    # 呈現：一專案一欄——carousel，每個專案一個 bubble（專案名為標頭）；其下該專案各卡片
+    # （卡名 + 每任務一行「日期區間 · 短標籤 · @負責人」）。唯讀、投影。
     if not tasks:
-        bubble = {"type": "bubble", "size": "mega", "header": _fheader(),
+        bubble = {"type": "bubble", "size": "mega",
+                  "header": {"type": "box", "layout": "vertical", "contents": [
+                      {"type": "text", "text": f"意念情境・{title}", "size": "xs", "color": "#AAAAAA", "wrap": True}]},
                   "body": {"type": "box", "layout": "vertical", "contents": [
                       {"type": "text", "text": f"{dir_label} {win_label}內無工項", "size": "sm", "color": "#666666", "wrap": True},
                       {"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA", "margin": "sm"},
@@ -1038,29 +1052,40 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         return f"至 {f(end)}"
 
     from collections import OrderedDict
-    cards = OrderedDict()   # (public, card) → [(short, alias, start, end)]；卡片依最早日期
+    projects = OrderedDict()   # public → OrderedDict(card_name → [(short, alias, start, end)])；依最早日期
     for public, card_name, short, alias, start, end, _sd in tasks:
-        cards.setdefault((public, card_name), []).append((short, alias, start, end))
+        projects.setdefault(public, OrderedDict()).setdefault(card_name, []).append((short, alias, start, end))
 
-    body = [{"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA"}]
-    for (public, card_name), tlist in cards.items():
-        blk = [
-            {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True},
-            {"type": "text", "text": card_name, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True, "margin": "xs"},
-        ]
-        for short, alias, start, end in tlist:
-            seg = [_drange(start, end)] + ([short] if short else []) + ([alias] if alias else [])
-            blk.append({"type": "text", "text": " · ".join(seg), "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
-        body.append({"type": "separator", "margin": "lg"})
-        body.append({"type": "box", "layout": "vertical", "margin": "lg", "contents": blk})
-    if truncated:
-        body.append({"type": "separator", "margin": "lg"})
-        body.append({"type": "text", "text": f"… 僅顯示前 {_FUTURE_MAX_EVENTS} 筆，請縮小視窗",
-                     "size": "xs", "color": "#AAAAAA", "margin": "lg", "wrap": True})
+    proj_items = list(projects.items())
+    proj_trunc = truncated or len(proj_items) > 12
+    proj_items = proj_items[:12]
 
-    bubble = {"type": "bubble", "size": "mega", "header": _fheader(),
-              "body": {"type": "box", "layout": "vertical", "contents": body}}
-    return [{"type": "flex", "altText": f"意念情境 {title}（{len(tasks)} 筆）", "contents": bubble, "quickReply": qr}]
+    bubbles = []
+    for public, cards in proj_items:
+        body = []
+        for ci, (card_name, tlist) in enumerate(cards.items()):
+            blk = [{"type": "text", "text": card_name, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True}]
+            for short, alias, start, end in tlist:
+                seg = [_drange(start, end)] + ([short] if short else []) + ([alias] if alias else [])
+                blk.append({"type": "text", "text": " · ".join(seg), "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
+            if ci > 0:
+                body.append({"type": "separator", "margin": "lg"})
+            body.append({"type": "box", "layout": "vertical", "margin": ("lg" if ci > 0 else "none"), "contents": blk})
+        bubbles.append({
+            "type": "bubble", "size": "mega",
+            "header": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": f"意念情境・{title}｜依目前進度推算", "size": "xs", "color": "#AAAAAA", "wrap": True},
+                {"type": "text", "text": public, "weight": "bold", "size": "md", "color": "#1A1A1A", "margin": "sm", "wrap": True},
+            ]},
+            "body": {"type": "box", "layout": "vertical", "contents": body},
+        })
+
+    if proj_trunc and bubbles:
+        bubbles[-1]["body"]["contents"].append({"type": "separator", "margin": "lg"})
+        bubbles[-1]["body"]["contents"].append({"type": "text", "text": "… 更多請縮小視窗", "size": "xs", "color": "#AAAAAA", "margin": "lg", "wrap": True})
+
+    contents = bubbles[0] if len(bubbles) == 1 else {"type": "carousel", "contents": bubbles}
+    return [{"type": "flex", "altText": f"意念情境 {title}（{len(tasks)} 筆）", "contents": contents, "quickReply": qr}]
 
 
 def run_daily_push():
