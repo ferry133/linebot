@@ -957,7 +957,8 @@ def _future_quick_reply():
 def build_future_messages_for_user(direction, days, allowed_board_ids, owner_alias):
     """未來/過去區間工項清單（on-demand）。RBAC 由呼叫端以既有 _get_user_auth 算好
     allowed_board_ids（None=不限、[]=封鎖、[ids]=限定）+ owner_alias（vendor=自身、其餘 None）傳入。
-    列未完成、有 [@] tag、start 或 end 落在區間的工項，依日期升序、標開始/到期。唯讀、投影。"""
+    列未完成、有 [@] tag、start 或 end 落在區間的工項；每任務僅一筆（日期區間抬頭 + 原始 tag），
+    同一張卡的多個 tag 合併為一個卡片單元，依最早日期升序。唯讀、投影。"""
     days = days if days in (d for _, d in FUTURE_WINDOWS) else FUTURE_DEFAULT_DAYS
     direction = "past" if direction == "past" else "future"
     today = date.today()
@@ -972,18 +973,19 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     allowed = set(allowed_board_ids) if allowed_board_ids is not None else None
     oa = owner_alias or None
     label_map = _all_project_names()
-    events = []  # (event_date, kind, public_label, card_name, item_label)
+    tasks = []  # (public_label, card_name, raw_tag, start, end, sort_date)；每任務一筆（不拆開始/到期）
 
-    def _consider(names, start, end, label, is_complete, public, card_name):
+    def _consider(names, start, end, is_complete, public, card_name, raw):
         if is_complete:
             return
         if oa is not None and oa not in [n.lower() for n in names]:
             return
-        lbl = label or card_name
-        if start and lo <= start <= hi:
-            events.append((start, "開始", public, card_name, lbl))
-        if end and lo <= end <= hi:
-            events.append((end, "到期", public, card_name, lbl))
+        s_in = bool(start and lo <= start <= hi)
+        e_in = bool(end and lo <= end <= hi)
+        if not (s_in or e_in):          # 開始或結束落在區間才納入
+            return
+        sd = min(d for d, ok in ((start, s_in), (end, e_in)) if ok)
+        tasks.append((public, card_name, (raw or "").strip(), start, end, sd))
 
     for board in _scan_boards():
         if allowed is not None and board["id"] not in allowed:
@@ -991,31 +993,32 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         public = label_map.get(board["id"]) or "（未登錄專案）"
         for card in board["cards"]:
             if card.get("desc"):
-                p = parse_tag(card["desc"].split("\n")[0])
+                first = card["desc"].split("\n")[0]
+                p = parse_tag(first)
                 if p:
-                    names, start, end, _et, label = p
-                    _consider(names, start, end, label, bool(card.get("dueComplete")), public, card["name"])
+                    names, start, end, _et, _label = p
+                    _consider(names, start, end, bool(card.get("dueComplete")), public, card["name"], first)
             for cl in card.get("checklists", []):
                 for it in cl.get("checkItems", []):
                     p = parse_tag(it["name"])
                     if not p:
                         continue
-                    names, start, end, _et, label = p
-                    _consider(names, start, end, label, it.get("state") == "complete", public, card["name"])
+                    names, start, end, _et, _label = p
+                    _consider(names, start, end, it.get("state") == "complete", public, card["name"], it["name"])
 
-    events.sort(key=lambda e: e[0])
-    truncated = len(events) > _FUTURE_MAX_EVENTS
-    events = events[:_FUTURE_MAX_EVENTS]
+    tasks.sort(key=lambda t: t[5])
+    truncated = len(tasks) > _FUTURE_MAX_EVENTS
+    tasks = tasks[:_FUTURE_MAX_EVENTS]
 
-    # 格式對齊「今日提醒」：同款 bubble header（灰標題列 + 粗體標題）＋每筆事件一區塊
-    # （彩色粗體抬頭「日期 開始/到期」＋灰路徑 public_label ＋深色內文 卡片／label），區塊間分隔線。
+    # 呈現：同款 bubble header；每張卡一個單元（合併同卡多個 tag）；每個 tag 一行
+    # 日期區間抬頭（start／end／start–end）＋原始 [@(alias),期間] tag（含 label）。
     def _fheader():
         return {"type": "box", "layout": "vertical", "contents": [
             {"type": "text", "text": "意念情境・未來工項", "size": "xs", "color": "#AAAAAA"},
             {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A", "margin": "sm"},
         ]}
 
-    if not events:
+    if not tasks:
         bubble = {"type": "bubble", "size": "mega", "header": _fheader(),
                   "body": {"type": "box", "layout": "vertical", "contents": [
                       {"type": "text", "text": f"{dir_label} {win_label}內無工項", "size": "sm", "color": "#666666", "wrap": True},
@@ -1023,18 +1026,30 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
                   ]}}
         return [{"type": "flex", "altText": f"意念情境 {title}（0）", "contents": bubble, "quickReply": qr}]
 
-    kind_color = {"開始": "#1976D2", "到期": "#D32F2F"}
+    def _drange(start, end):
+        f = lambda d: d.strftime("%m/%d")
+        if start and end:
+            return f"{f(start)}–{f(end)}"
+        if start:
+            return f"{f(start)} 起"
+        return f"至 {f(end)}"
+
+    from collections import OrderedDict
+    cards = OrderedDict()   # (public, card) → [(raw, start, end)]；卡片依最早日期（tasks 已排序）
+    for public, card_name, raw, start, end, _sd in tasks:
+        cards.setdefault((public, card_name), []).append((raw, start, end))
+
     body = [{"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA"}]
-    for edate, kind, public, card_name, lbl in events:
-        wd = "日一二三四五六"[int(edate.strftime("%w"))]
-        item_text = card_name if lbl == card_name else f"{card_name}／{lbl}"
+    for (public, card_name), tlist in cards.items():
+        blk = [
+            {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True},
+            {"type": "text", "text": card_name, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True, "margin": "xs"},
+        ]
+        for raw, start, end in tlist:
+            blk.append({"type": "text", "text": _drange(start, end), "weight": "bold", "size": "sm", "color": "#1976D2", "wrap": True, "margin": "md"})
+            blk.append({"type": "text", "text": raw, "size": "sm", "color": "#333333", "wrap": True, "margin": "xs"})
         body.append({"type": "separator", "margin": "lg"})
-        body.append({"type": "box", "layout": "vertical", "margin": "lg", "contents": [
-            {"type": "text", "text": f"{edate.strftime('%m/%d')}（{wd}） {kind}",
-             "weight": "bold", "color": kind_color.get(kind, "#666666"), "size": "md", "wrap": True},
-            {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
-            {"type": "text", "text": item_text, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"},
-        ]})
+        body.append({"type": "box", "layout": "vertical", "margin": "lg", "contents": blk})
     if truncated:
         body.append({"type": "separator", "margin": "lg"})
         body.append({"type": "text", "text": f"… 僅顯示前 {_FUTURE_MAX_EVENTS} 筆，請縮小視窗",
@@ -1042,7 +1057,7 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
 
     bubble = {"type": "bubble", "size": "mega", "header": _fheader(),
               "body": {"type": "box", "layout": "vertical", "contents": body}}
-    return [{"type": "flex", "altText": f"意念情境 {title}（{len(events)} 筆）", "contents": bubble, "quickReply": qr}]
+    return [{"type": "flex", "altText": f"意念情境 {title}（{len(tasks)} 筆）", "contents": bubble, "quickReply": qr}]
 
 
 def run_daily_push():
