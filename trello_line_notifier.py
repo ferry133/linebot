@@ -973,9 +973,9 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     allowed = set(allowed_board_ids) if allowed_board_ids is not None else None
     oa = owner_alias or None
     label_map = _all_project_names()
-    tasks = []  # (public_label, card_name, raw_tag, start, end, sort_date)；每任務一筆（不拆開始/到期）
+    tasks = []  # (public, card_name, short_label, alias, start, end, sort_date)；每任務一筆、精簡一行
 
-    def _consider(names, start, end, is_complete, public, card_name, raw):
+    def _consider(names, start, end, label, is_complete, public, card_name):
         if is_complete:
             return
         if oa is not None and oa not in [n.lower() for n in names]:
@@ -985,7 +985,11 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         if not (s_in or e_in):          # 開始或結束落在區間才納入
             return
         sd = min(d for d, ok in ((start, s_in), (end, e_in)) if ok)
-        tasks.append((public, card_name, (raw or "").strip(), start, end, sd))
+        short = (label or "").split("：")[0].split(":")[0].strip()   # 去掉冗長說明，只留短名
+        if len(short) > 18:
+            short = short[:18] + "…"
+        alias = ("@" + "@".join(names)) if names else ""
+        tasks.append((public, card_name, short, alias, start, end, sd))
 
     for board in _scan_boards():
         if allowed is not None and board["id"] not in allowed:
@@ -993,20 +997,19 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         public = label_map.get(board["id"]) or "（未登錄專案）"
         for card in board["cards"]:
             if card.get("desc"):
-                first = card["desc"].split("\n")[0]
-                p = parse_tag(first)
+                p = parse_tag(card["desc"].split("\n")[0])
                 if p:
-                    names, start, end, _et, _label = p
-                    _consider(names, start, end, bool(card.get("dueComplete")), public, card["name"], first)
+                    names, start, end, _et, label = p
+                    _consider(names, start, end, label, bool(card.get("dueComplete")), public, card["name"])
             for cl in card.get("checklists", []):
                 for it in cl.get("checkItems", []):
                     p = parse_tag(it["name"])
                     if not p:
                         continue
-                    names, start, end, _et, _label = p
-                    _consider(names, start, end, it.get("state") == "complete", public, card["name"], it["name"])
+                    names, start, end, _et, label = p
+                    _consider(names, start, end, label, it.get("state") == "complete", public, card["name"])
 
-    tasks.sort(key=lambda t: t[5])
+    tasks.sort(key=lambda t: t[6])
     truncated = len(tasks) > _FUTURE_MAX_EVENTS
     tasks = tasks[:_FUTURE_MAX_EVENTS]
 
@@ -1035,9 +1038,9 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         return f"至 {f(end)}"
 
     from collections import OrderedDict
-    cards = OrderedDict()   # (public, card) → [(raw, start, end)]；卡片依最早日期（tasks 已排序）
-    for public, card_name, raw, start, end, _sd in tasks:
-        cards.setdefault((public, card_name), []).append((raw, start, end))
+    cards = OrderedDict()   # (public, card) → [(short, alias, start, end)]；卡片依最早日期
+    for public, card_name, short, alias, start, end, _sd in tasks:
+        cards.setdefault((public, card_name), []).append((short, alias, start, end))
 
     body = [{"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA"}]
     for (public, card_name), tlist in cards.items():
@@ -1045,9 +1048,9 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
             {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True},
             {"type": "text", "text": card_name, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True, "margin": "xs"},
         ]
-        for raw, start, end in tlist:
-            blk.append({"type": "text", "text": _drange(start, end), "weight": "bold", "size": "sm", "color": "#1976D2", "wrap": True, "margin": "md"})
-            blk.append({"type": "text", "text": raw, "size": "sm", "color": "#333333", "wrap": True, "margin": "xs"})
+        for short, alias, start, end in tlist:
+            seg = [_drange(start, end)] + ([short] if short else []) + ([alias] if alias else [])
+            blk.append({"type": "text", "text": " · ".join(seg), "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
         body.append({"type": "separator", "margin": "lg"})
         body.append({"type": "box", "layout": "vertical", "margin": "lg", "contents": blk})
     if truncated:
