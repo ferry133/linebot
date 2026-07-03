@@ -1007,42 +1007,41 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     truncated = len(events) > _FUTURE_MAX_EVENTS
     events = events[:_FUTURE_MAX_EVENTS]
 
+    # 格式對齊「今日提醒」：同款 bubble header（灰標題列 + 粗體標題）＋每筆事件一區塊
+    # （彩色粗體抬頭「日期 開始/到期」＋灰路徑 public_label ＋深色內文 卡片／label），區塊間分隔線。
+    def _fheader():
+        return {"type": "box", "layout": "vertical", "contents": [
+            {"type": "text", "text": "意念情境・未來工項", "size": "xs", "color": "#AAAAAA"},
+            {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A", "margin": "sm"},
+        ]}
+
     if not events:
-        bubble = {"type": "bubble", "size": "mega", "body": {"type": "box", "layout": "vertical", "contents": [
-            {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A"},
-            {"type": "text", "text": f"{dir_label} {win_label}內無工項", "size": "sm", "color": "#666666", "margin": "md", "wrap": True},
-            {"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA", "margin": "sm"},
-        ]}}
+        bubble = {"type": "bubble", "size": "mega", "header": _fheader(),
+                  "body": {"type": "box", "layout": "vertical", "contents": [
+                      {"type": "text", "text": f"{dir_label} {win_label}內無工項", "size": "sm", "color": "#666666", "wrap": True},
+                      {"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA", "margin": "sm"},
+                  ]}}
         return [{"type": "flex", "altText": f"意念情境 {title}（0）", "contents": bubble, "quickReply": qr}]
 
-    from collections import OrderedDict
-    by_date = OrderedDict()
-    for edate, kind, public, card_name, lbl in events:
-        by_date.setdefault(edate, []).append((kind, public, card_name, lbl))
-
-    body = [
-        {"type": "text", "text": title, "weight": "bold", "size": "md", "color": "#1A1A1A"},
-        {"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA", "margin": "xs"},
-    ]
     kind_color = {"開始": "#1976D2", "到期": "#D32F2F"}
-    for edate, evs in by_date.items():
+    body = [{"type": "text", "text": "※ 依目前進度推算", "size": "xs", "color": "#AAAAAA"}]
+    for edate, kind, public, card_name, lbl in events:
         wd = "日一二三四五六"[int(edate.strftime("%w"))]
+        item_text = card_name if lbl == card_name else f"{card_name}／{lbl}"
         body.append({"type": "separator", "margin": "lg"})
-        body.append({"type": "text", "text": f"📅 {edate.strftime('%m/%d')}（{wd}）",
-                     "weight": "bold", "size": "sm", "color": "#333333", "margin": "lg"})
-        for kind, public, card_name, lbl in evs:
-            item_text = card_name if lbl == card_name else f"{card_name}／{lbl}"
-            body.append({"type": "box", "layout": "vertical", "margin": "sm", "contents": [
-                {"type": "text", "text": kind, "size": "xs", "weight": "bold", "color": kind_color.get(kind, "#666666")},
-                {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True},
-                {"type": "text", "text": item_text, "size": "sm", "color": "#333333", "wrap": True},
-            ]})
+        body.append({"type": "box", "layout": "vertical", "margin": "lg", "contents": [
+            {"type": "text", "text": f"{edate.strftime('%m/%d')}（{wd}） {kind}",
+             "weight": "bold", "color": kind_color.get(kind, "#666666"), "size": "md", "wrap": True},
+            {"type": "text", "text": public, "size": "xs", "color": "#999999", "wrap": True, "margin": "xs"},
+            {"type": "text", "text": item_text, "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"},
+        ]})
     if truncated:
         body.append({"type": "separator", "margin": "lg"})
         body.append({"type": "text", "text": f"… 僅顯示前 {_FUTURE_MAX_EVENTS} 筆，請縮小視窗",
                      "size": "xs", "color": "#AAAAAA", "margin": "lg", "wrap": True})
 
-    bubble = {"type": "bubble", "size": "mega", "body": {"type": "box", "layout": "vertical", "contents": body}}
+    bubble = {"type": "bubble", "size": "mega", "header": _fheader(),
+              "body": {"type": "box", "layout": "vertical", "contents": body}}
     return [{"type": "flex", "altText": f"意念情境 {title}（{len(events)} 筆）", "contents": bubble, "quickReply": qr}]
 
 
