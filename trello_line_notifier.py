@@ -1046,7 +1046,7 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     def _drange(start, end):
         f = lambda d: d.strftime("%m/%d")
         if start and end:
-            return f"{f(start)}–{f(end)}"
+            return f(start) if start == end else f"{f(start)}–{f(end)}"
         if start:
             return f"{f(start)} 起"
         return f"至 {f(end)}"
@@ -1066,7 +1066,8 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         for ci, (card_name, tlist) in enumerate(cards.items()):
             blk = [{"type": "text", "text": card_name, "weight": "bold", "size": "sm", "color": "#1A1A1A", "wrap": True}]
             for short, alias, start, end in tlist:
-                seg = [_drange(start, end)] + ([short] if short else []) + ([alias] if alias else [])
+                # who – when – what：@負責人 · 日期區間 · 任務描述
+                seg = ([alias] if alias else []) + [_drange(start, end)] + ([short] if short else [])
                 blk.append({"type": "text", "text": " · ".join(seg), "size": "sm", "color": "#333333", "wrap": True, "margin": "sm"})
             if ci > 0:
                 body.append({"type": "separator", "margin": "lg"})
