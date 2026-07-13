@@ -11,6 +11,13 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 
 TAIPEI = ZoneInfo("Asia/Taipei")
+
+
+def today_tw():
+    """台北時區的今天。pod 跑 UTC，date.today() 在台北 00:00–07:59 會差一天。"""
+    return datetime.now(TAIPEI).date()
+
+
 LINE_API = "https://api.line.me/v2/bot/message/push"
 LINE_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 TRELLO_KEY = os.environ.get("TRELLO_API_KEY", "")
@@ -344,7 +351,7 @@ def parse_tag(text):
 
 def days_diff(d, ref=None):
     """d 與基準日的天數差。ref 預設今日；someday 提醒傳入選定日以投影計算。"""
-    return (d - (ref or date.today())).days
+    return (d - (ref or today_tw())).days
 
 
 def _summary_window(start, end):
@@ -407,18 +414,26 @@ def check_item(names, start, end, end_time, label, contacts, board_name, list_na
             notifications.append((uid, board_name, rec))
 
     # 單一每日批次：一次評估全部觸發條件（原 morning/noon/evening 合併）。
-    # #2 今日開始
-    if start and dd(start) == 0:
-        add(sponsors, "今日開始", "#388E3C")
+    time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
+    # 單日工項（start==end 且未完成）：開始/到期合併為一筆，收件人與顏色取到期側（較急迫）。
+    # 已完成者到期側抑制 → 走下方 #1/#2；已過去（dd<0）由 #6 呈現，不合併。
+    merged = active and start and end and start == end and dd(start) >= 0
+    if merged and dd(start) == 0:
+        add(set(sponsors + internal), f"今天{time_str}開始＆到期", "#D32F2F")
+    if merged and 1 <= dd(start) <= 7:
+        d = dd(start)
+        add(set(sponsors + internal), f"{d} 天後開始＆到期", _due_color(d))
+    # #2 今天開始
+    if not merged and start and dd(start) == 0:
+        add(sponsors, "今天開始", "#388E3C")
     # #1 開始倒數（1–7 天後）
-    if start and 1 <= dd(start) <= 7:
+    if not merged and start and 1 <= dd(start) <= 7:
         add(sponsors, f"{dd(start)} 天後開始", "#1976D2")
-    # #4 今日到期（#5「今日時間已過」在清晨每日批次視為惰性，由本條涵蓋）
-    if active and end and dd(end) == 0:
-        time_str = f"（{end_time.strftime('%H:%M')}）" if end_time else ""
-        add(set(sponsors + internal), f"今日{time_str}到期", "#D32F2F")
+    # #4 今天到期（#5「今日時間已過」在清晨每日批次視為惰性，由本條涵蓋）
+    if not merged and active and end and dd(end) == 0:
+        add(set(sponsors + internal), f"今天{time_str}到期", "#D32F2F")
     # #3 結束倒數（1–7 天內）
-    if active and end and 1 <= dd(end) <= 7:
+    if not merged and active and end and 1 <= dd(end) <= 7:
         d = dd(end)
         add(set(sponsors + internal), f"{d} 天內到期", _due_color(d))
     # #6 已逾期（所有執行日皆呈現；批次排程 Sun–Fri，週六不跑）
@@ -566,7 +581,7 @@ def run_checks(as_of=None):
     """單一每日批次：一次評估全部觸發條件（#1–#9），回傳 (uid, board_name, rec) 清單。
     主管(internal)額外得每日摘要與可操作確認卡。交付（push 過濾 / on-demand 拉取）由呼叫端決定。
     as_of 預設今日；someday 提醒傳入選定日 → 以目前 Trello 進度、選定日日曆投影計算（非歷史）。"""
-    as_of = as_of or date.today()
+    as_of = as_of or today_tw()
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
     from collections import defaultdict
@@ -927,7 +942,7 @@ def build_daily_messages_for_user(user_id, role=None, as_of=None):
     as_of 預設今日；傳入選定日 → someday 提醒（投影、唯讀、標頭顯示該日 + 推算註記）。內容定義
     與每日批次一致：跑 run_checks(as_of) 後過濾出該 uid 的項目。指定日期入口由 Rich Menu 提供，
     內容不再放 datetimepicker 按鈕。今日無內容回 []（呼叫端回文字）；someday 無內容回推算註記。"""
-    today = date.today()
+    today = today_tw()
     is_today = (as_of is None or as_of == today)
     ref = today if as_of is None else as_of
     notifications = run_checks(as_of=ref)
@@ -976,7 +991,7 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     同一張卡的多個 tag 合併為一個卡片單元，依最早日期升序。唯讀、投影。"""
     days = days if days in (d for _, d in FUTURE_WINDOWS) else FUTURE_DEFAULT_DAYS
     direction = "past" if direction == "past" else "future"
-    today = date.today()
+    today = today_tw()
     if direction == "future":
         lo, hi, dir_label = today, today + timedelta(days=days), "未來"
     else:
