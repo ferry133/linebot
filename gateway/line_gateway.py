@@ -211,11 +211,15 @@ def webhook():
 
         threading.Thread(target=_upsert_line_user, args=(user_id,), daemon=True).start()
 
+        src = event.get("source", {})
         broker.publish(INBOX_TOPIC, {
             "user_id": user_id,
             "text": text,
             "timestamp": event.get("timestamp"),
             "source": "line",
+            # 群組/聊天室來源 id：供 agent 判斷「這則是不是來自主管通知群」——
+            # 停用期間的轉發要避免把該群自己的訊息又推回同一群。
+            "group_id": src.get("groupId") or src.get("roomId"),
             "reply_token": event.get("replyToken"),
         })
 
