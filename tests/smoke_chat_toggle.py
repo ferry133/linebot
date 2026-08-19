@@ -162,16 +162,15 @@ check("未轉發主管（對話開啟時走 escalate 而非轉發）", not fwd, 
 # ── 6. 轉發主管群組的內容與去回音 ──────────────────────────────────────────
 print("\n[6] _forward_offline_message")
 cs = load(None)
-import trello_line_notifier as tln
 
-def fwd_case(group_id, notify_group, contacts=None):
+def fwd_case(group_id, notify_group, managers=None, status=200):
+    """managers: [(line_id, role)] — 模擬 line_users 查詢結果（notify group 未設定時才會用到）。"""
     agent, _ = make_agent(cs)
     agent._user_identity = lambda uid: ("王小明", "小明", "customer")
     sent = []
-    cs.send_line = lambda uid, msg: sent.append((uid, msg))
+    cs.send_line = lambda uid, msg: (sent.append((uid, msg)), (status, "")) [1]
     cs.LINE_NOTIFY_GROUP_ID = notify_group
-    if contacts is not None:
-        tln.load_contacts = lambda: contacts
+    cs.db_exec = lambda fn: managers if managers is not None else []
     agent._forward_offline_message("U" + "y" * 32, "浴室磁磚什麼時候貼？", group_id)
     return sent
 
@@ -187,9 +186,34 @@ check("來自通知群本身 → 不轉發（避免回音）", sent == [], str(s
 sent = fwd_case("Cother", "Cnotify")
 check("其他群組來訊 → 轉發並標記群組", len(sent) == 1 and "群組" in sent[0][1], str(sent))
 
-sent = fwd_case(None, "", contacts={"sa": "Usa", "larry": "Ularry"})
-check("未設通知群 → 回退 sa/larry 個人",
-      [u for u, _ in sent] == ["Usa", "Ularry"], str([u for u, _ in sent]))
+sent = fwd_case(None, "", managers=[("Uadmin1", "admin"), ("Uemp1", "employee"), ("Uadmin2", "admin")])
+check("未設通知群 → 送 line_users 的 admin（不含 employee）",
+      [u for u, _ in sent] == ["Uadmin1", "Uadmin2"], str([u for u, _ in sent]))
+
+sent = fwd_case(None, "", managers=[("Uemp1", "employee"), ("Uemp2", "employee")])
+check("未設通知群且無 admin → 退 employee",
+      [u for u, _ in sent] == ["Uemp1", "Uemp2"], str([u for u, _ in sent]))
+
+sent = fwd_case(None, "", managers=[])
+check("未設通知群且查無主管 → 不送（且不炸）", sent == [], str(sent))
+
+# 回歸：舊的 contacts fallback（key 是顯示名）比對 alias 永遠落空 → 已移除
+agent_probe, _ = make_agent(cs)
+cs.LINE_NOTIFY_GROUP_ID = ""
+cs.db_exec = lambda fn: [("Uadmin1", "admin")]
+check("_manager_targets 不再依賴 contacts", agent_probe._manager_targets() == ["Uadmin1"],
+      str(agent_probe._manager_targets()))
+cs.LINE_NOTIFY_GROUP_ID = "Cnotify"
+check("設了通知群就只送通知群", agent_probe._manager_targets() == ["Cnotify"],
+      str(agent_probe._manager_targets()))
+
+# 送達計數：HTTP 非 200 不算送達
+agent_probe, _ = make_agent(cs)
+cs.LINE_NOTIFY_GROUP_ID = "Cnotify"
+cs.send_line = lambda uid, msg: (500, "boom")
+check("send_line 回 500 → _notify_managers 回 0", agent_probe._notify_managers("x") == 0)
+cs.send_line = lambda uid, msg: (200, "")
+check("send_line 回 200 → _notify_managers 回 1", agent_probe._notify_managers("x") == 1)
 
 # ── 7. gateway 透傳 group_id ────────────────────────────────────────────────
 print("\n[7] gateway 把 group_id 帶進 inbox payload")
