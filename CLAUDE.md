@@ -44,6 +44,9 @@ gateway/line_gateway.py (Flask)
 
 agents/customer_service.py（獨立 process，五步循環 Perceive→Recall→Reason→Act→Reflect）
   ├─ 文字訊息 → Claude agentic loop（model claude-haiku-4-5-20251001, MAX_TOOL_TURNS=5）
+  │    ⚠️ 目前以 `CHAT_ENABLED`（預設 false）**停用**；關閉時一般文字回固定引導訊息
+  │    （不呼叫 Claude/不查 Trello/不寫記憶）+ 原文轉發 LINE_NOTIFY_GROUP_ID
+  │    （來源即該群時不轉，避免回音）；關鍵字與 postback 入口照常
   │    tools: query_trello / get_project_photos / escalate_to_manager
   ├─ postback：o=complete|incomplete（標記工項）/ o=confirm|reject（主管追認）
   │            / o=guide（線上說明）/ o=daily（今日提醒 → 每日 Flex）
@@ -118,6 +121,7 @@ CronJob trello-notifier-daily（08:00 Asia/Taipei，週日至週五 0-5）
 | `LINE_NOTIFY_GROUP_ID` | escalate 升級通知群組（未設定 fallback sa/larry）|
 | `TRELLO_API_KEY` / `TRELLO_TOKEN` | Trello API 憑證 |
 | `DATABASE_URL` | linebot 專屬 PostgreSQL（與 k8scc 分開）|
+| `CHAT_ENABLED` | 客服自由對話開關；**預設 false（停用）**。恢復：jg-base deploy.yaml 設 `"true"` + rollout。非 `1/true/yes/on` 一律視為關閉（fail-closed）；pod 啟動 log 會印 `chat=enabled|disabled` |
 
 ## Agent Memory DB
 

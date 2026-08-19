@@ -87,6 +87,20 @@ def _parse_future_keyword(text: str):
         days = 30                # 非預設視窗 → 回退 1 月
     return (direction, days)
 
+# 對話功能開關：未設定/無法辨識的值一律視為關閉（fail-closed），避免打錯字造成非預期 LLM 花費。
+# 關閉時僅停用「自由對話」fallback；Rich Menu/關鍵字/postback 三入口與工項動作不受影響。
+CHAT_ENABLED = os.environ.get("CHAT_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+CHAT_DISABLED_NOTICE = (
+    "目前客服對話功能暫停中，暫時無法以文字問答。\n"
+    "您的訊息已轉交專人，我們會盡快與您聯繫。\n\n"
+    "以下功能仍可使用（請點下方選單）：\n"
+    "・今日提醒：今天要開始/到期的工項\n"
+    "・未來工項：未來或過去區間的工項\n"
+    "・使用說明：各項功能操作指引\n\n"
+    "如需立即協助，也可直接聯繫服務人員。"
+)
+
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
 MAX_TOKENS = 2048
@@ -298,6 +312,14 @@ class CustomerServiceAgent:
         if _fut:
             log.info(f"[{AGENT_ID}] Future keyword from {user_id[:8]}: {_fut}")
             threading.Thread(target=self._handle_future, args=(user_id, reply_token, _fut[0], _fut[1]), daemon=True).start()
+            return
+        # 對話功能關閉 → 固定引導訊息（走既有 Reply 優先出口），不呼叫 Claude、不寫記憶；
+        # 同時把原文轉發主管群組，避免停用期間的提問無人承接（send_line 是網路呼叫 → 背景執行）
+        if not CHAT_ENABLED:
+            log.info(f"[{AGENT_ID}] Chat disabled; notice to {user_id[:8]}")
+            self._reply(user_id, CHAT_DISABLED_NOTICE, reply_token)
+            threading.Thread(target=self._forward_offline_message,
+                             args=(user_id, text, payload.get("group_id")), daemon=True).start()
             return
         log.info(f"[{AGENT_ID}] Received from {user_id[:8]}: {text[:60]}")
         # 背景執行，避免阻塞 MQTT loop（event.wait 需要 loop 持續運作才能收到 Trello 回覆）
@@ -569,18 +591,45 @@ class CustomerServiceAgent:
             f"原因：{reason}\n"
             f"客戶 ID：{source_user_id[:8]}..."
         )
+        self._notify_managers(msg)
+
+    def _notify_managers(self, msg: str):
+        """主管通知的單一出口：優先送 LINE_NOTIFY_GROUP_ID，未設定才回退 sa/larry 個人。"""
         if LINE_NOTIFY_GROUP_ID:
             send_line(LINE_NOTIFY_GROUP_ID, msg)
-        else:
-            try:
-                from trello_line_notifier import load_contacts
-                contacts = load_contacts()
-                for name in ("sa", "larry"):
-                    uid = contacts.get(name)
-                    if uid:
-                        send_line(uid, msg)
-            except Exception:
-                pass
+            return
+        try:
+            from trello_line_notifier import load_contacts
+            contacts = load_contacts()
+            for name in ("sa", "larry"):
+                uid = contacts.get(name)
+                if uid:
+                    send_line(uid, msg)
+        except Exception:
+            pass
+
+    def _forward_offline_message(self, user_id: str, text: str, group_id: str | None = None):
+        """對話停用期間，把使用者原文轉給主管，讓提問不會沉沒。
+        來源本身就是主管通知群時不轉（否則該群的訊息會被推回同一群）。"""
+        if group_id and LINE_NOTIFY_GROUP_ID and group_id == LINE_NOTIFY_GROUP_ID:
+            log.info(f"[{AGENT_ID}] Offline msg from notify group; not forwarding")
+            return
+        try:
+            display, alias, role = self._user_identity(user_id)
+            who = f"{display}（{alias}）" if alias else display
+            now = datetime.now(TAIPEI).strftime("%Y/%m/%d %H:%M")
+            where = "群組" if group_id else "一對一"
+            msg = (
+                f"📨 客服對話停用期間來訊（需人工回覆）\n"
+                f"時間：{now}\n"
+                f"來自：{who}／{role}／{where}\n"
+                f"內容：{text[:800]}\n"
+                f"使用者 ID：{user_id[:8]}..."
+            )
+            self._notify_managers(msg)
+            log.info(f"[{AGENT_ID}] Forwarded offline msg from {user_id[:8]} to managers")
+        except Exception as e:
+            log.exception(f"[{AGENT_ID}] forward offline msg failed for {user_id[:8]}: {e}")
 
 
     # ── 工項完成狀態更新（提醒卡片按鈕 / 主管追認）──────────────────────────────
@@ -854,5 +903,5 @@ if __name__ == "__main__":
     agent = CustomerServiceAgent(broker)
     broker.connect()
     agent.start()
-    log.info(f"[{AGENT_ID}] Agent running...")
+    log.info(f"[{AGENT_ID}] Agent running... chat={'enabled' if CHAT_ENABLED else 'disabled'}")
     broker.loop_forever()
