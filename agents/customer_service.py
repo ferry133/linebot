@@ -593,20 +593,48 @@ class CustomerServiceAgent:
         )
         self._notify_managers(msg)
 
-    def _notify_managers(self, msg: str):
-        """主管通知的單一出口：優先送 LINE_NOTIFY_GROUP_ID，未設定才回退 sa/larry 個人。"""
+    def _manager_targets(self) -> list:
+        """主管通知對象：優先 LINE_NOTIFY_GROUP_ID；未設定則查 line_users 的 admin
+        （無 admin 才退 employee）。不使用 contacts（其 key 是顯示名，比對 alias 永遠落空）。"""
         if LINE_NOTIFY_GROUP_ID:
-            send_line(LINE_NOTIFY_GROUP_ID, msg)
-            return
+            return [LINE_NOTIFY_GROUP_ID]
+
+        def _q(conn):
+            with conn.cursor() as cur:
+                cur.execute("SELECT line_id, role FROM line_users WHERE role IN ('admin','employee')")
+                return cur.fetchall()
         try:
-            from trello_line_notifier import load_contacts
-            contacts = load_contacts()
-            for name in ("sa", "larry"):
-                uid = contacts.get(name)
-                if uid:
-                    send_line(uid, msg)
-        except Exception:
-            pass
+            rows = db_exec(_q) or []
+        except Exception as e:
+            log.warning(f"[{AGENT_ID}] manager lookup failed: {e}")
+            return []
+        by_role = {"admin": [], "employee": []}
+        for r in rows:
+            line_id, role = (r["line_id"], r["role"]) if isinstance(r, dict) else (r[0], r[1])
+            if line_id:
+                by_role.setdefault(role, []).append(line_id)
+        return by_role["admin"] or by_role["employee"]
+
+    def _notify_managers(self, msg: str) -> int:
+        """主管通知的單一出口。回傳實際送達人數——0 必須留下 warning，
+        否則「沒人收到」在 log 裡會與「已通知」長得一模一樣。"""
+        targets = self._manager_targets()
+        if not targets:
+            log.warning(f"[{AGENT_ID}] No manager target (LINE_NOTIFY_GROUP_ID unset and no admin/employee in line_users); message dropped")
+            return 0
+        sent = 0
+        for uid in targets:
+            try:
+                sc, _body = send_line(uid, msg)
+                if sc == 200:
+                    sent += 1
+                else:
+                    log.warning(f"[{AGENT_ID}] manager notify failed for {uid[:8]}: HTTP {sc}")
+            except Exception as e:
+                log.warning(f"[{AGENT_ID}] manager notify error for {uid[:8]}: {e}")
+        if sent == 0:
+            log.warning(f"[{AGENT_ID}] manager notify reached nobody ({len(targets)} target(s) tried)")
+        return sent
 
     def _forward_offline_message(self, user_id: str, text: str, group_id: str | None = None):
         """對話停用期間，把使用者原文轉給主管，讓提問不會沉沒。
@@ -626,8 +654,8 @@ class CustomerServiceAgent:
                 f"內容：{text[:800]}\n"
                 f"使用者 ID：{user_id[:8]}..."
             )
-            self._notify_managers(msg)
-            log.info(f"[{AGENT_ID}] Forwarded offline msg from {user_id[:8]} to managers")
+            sent = self._notify_managers(msg)
+            log.info(f"[{AGENT_ID}] Forwarded offline msg from {user_id[:8]} to {sent} manager target(s)")
         except Exception as e:
             log.exception(f"[{AGENT_ID}] forward offline msg failed for {user_id[:8]}: {e}")
 

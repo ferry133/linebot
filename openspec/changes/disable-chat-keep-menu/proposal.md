@@ -6,7 +6,8 @@
 
 - 新增對話功能開關（環境變數 `CHAT_ENABLED`，預設 **關閉**）。關閉時 customer-service agent 對一般文字訊息**不呼叫 Claude**、不查 Trello、不 escalate、不寫入 `working_memory`／`episodes`／`knowledge`。
 - 關閉期間收到未命中保留入口的文字訊息 → 以固定引導訊息經 **Reply API（免費）** 回覆（告知已轉交專人並指引 Rich Menu 三格）。
-- 同時把**原文轉發主管通知群組**（`LINE_NOTIFY_GROUP_ID`，未設定回退 sa/larry），附來源身分/角色/時間，讓停用期間的提問不會沉沒；來源本身是該通知群時不轉發（避免回音）。
+- 同時把**原文轉發主管**（`LINE_NOTIFY_GROUP_ID`；未設定則送 `line_users` 的 admin，無 admin 才退 employee），附來源身分/角色/時間，讓停用期間的提問不會沉沒；來源本身是該通知群時不轉發（避免回音）。
+- **順帶修掉既有靜默失敗**：`_escalate` 原本回退 `contacts` 的 `sa`/`larry`，但 contacts 以顯示名為 key → 永遠落空；production `LINE_NOTIFY_GROUP_ID` 為空，因此升級通知一直沒人收到卻 log「已通知」。改用同一個以 role 為準的出口，並回報實際送達數。
 - **保留不受開關影響**：
   - Rich Menu postback `o=daily`／`o=someday`／`o=future`／`o=guide`
   - 文字關鍵字備援：`GUIDE_KEYWORDS`（使用說明）、`DAILY_KEYWORDS`（今日提醒）、未來/過去工項關鍵字

@@ -48,11 +48,11 @@ customer-service agent 啟動時 SHALL 於 log 輸出目前模式（`chat=enable
 
 ### Requirement: 關閉時將來訊轉發主管
 
-對話功能關閉時，系統 SHALL 將該筆未命中保留入口的文字原文轉發給主管：優先送 `LINE_NOTIFY_GROUP_ID`，未設定時 SHALL 回退至聯絡簿中的 `sa` 與 `larry`。轉發內容 SHALL 含發生時間、來源使用者顯示名（有 alias 時併同呈現）、角色、來源為一對一或群組、以及原文（可截斷）。
+對話功能關閉時，系統 SHALL 將該筆未命中保留入口的文字原文轉發給主管：優先送 `LINE_NOTIFY_GROUP_ID`；未設定時 SHALL 送給 `line_users` 中 `role='admin'` 的使用者，若無 admin 才退 `role='employee'`。SHALL NOT 以聯絡簿（contacts）的固定名字（如 `sa`／`larry`）作為對象來源——該對映以顯示名為 key，比對 alias 永遠落空，會造成「看起來已通知、實際沒人收到」。轉發內容 SHALL 含發生時間、來源使用者顯示名（有 alias 時併同呈現）、角色、來源為一對一或群組、以及原文（可截斷）。
 
 當該訊息的來源即主管通知群本身時，系統 SHALL NOT 轉發（避免把該群訊息推回同一群造成回音）；此判定 SHALL 以 gateway 帶入的來源群組/聊天室 id 為依據。
 
-轉發 SHALL NOT 阻塞訊息處理迴圈，且轉發失敗 SHALL NOT 影響已送出的使用者回覆。轉發成功與「因來源為通知群而跳過」SHALL 各自留下 log，使實際結果可被量測。
+轉發 SHALL NOT 阻塞訊息處理迴圈，且轉發失敗 SHALL NOT 影響已送出的使用者回覆。轉發 log SHALL 記錄**實際送達的對象數**（LINE API 非 200 不計入），並在 0 送達時留下 warning；「因來源為通知群而跳過」SHALL 另有 log。同一出口 SHALL 同時供 `escalate_to_manager` 使用，兩者不得各自維護一份對象清單。
 
 #### Scenario: 一對一提問轉給主管群
 - **WHEN** 對話關閉且客戶在一對一傳「浴室磁磚什麼時候貼？」
@@ -68,9 +68,18 @@ customer-service agent 啟動時 SHALL 於 log 輸出目前模式（`chat=enable
 - **WHEN** 對話關閉且訊息來自非通知群的群組
 - **THEN** 轉發內容標記其來源為群組
 
-#### Scenario: 未設定通知群時回退個人
+#### Scenario: 未設定通知群時送 admin
 - **WHEN** 對話關閉、`LINE_NOTIFY_GROUP_ID` 未設定且收到一般文字訊息
-- **THEN** 轉發分別送至聯絡簿的 `sa` 與 `larry`
+- **THEN** 轉發送給 `line_users` 中所有 `role='admin'` 者（不含 employee）
+
+#### Scenario: 沒有 admin 才退 employee
+- **WHEN** `LINE_NOTIFY_GROUP_ID` 未設定且 `line_users` 無 admin
+- **THEN** 轉發送給 `role='employee'` 者
+
+#### Scenario: 沒有任何對象時留下警告
+- **WHEN** `LINE_NOTIFY_GROUP_ID` 未設定且查無 admin/employee
+- **THEN** 不送出訊息
+- **THEN** log 留下 warning，使「沒人收到」不會讀起來像「已通知」
 
 #### Scenario: 保留入口不觸發轉發
 - **WHEN** 對話關閉且使用者輸入「今日提醒」或點選 Rich Menu

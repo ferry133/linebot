@@ -40,8 +40,11 @@ _替代方案_：預設 `true` + 在 jg-base 設 `false` → 關閉這件事同�
 不寫 `working_memory`，避免停用期間累積無工具、低品質 episode；也讓恢復後的記憶延續停用前的狀態。
 
 **D6a：停用期間的來訊轉發主管群，且來源是通知群時不轉。**
-`_forward_offline_message` 走與 escalate 相同的出口（抽出 `_notify_managers`：優先 `LINE_NOTIFY_GROUP_ID`，未設定回退 sa/larry），訊息含時間／顯示名（alias）／角色／一對一或群組／原文（截 800 字）。bot 本身是通知群成員，故該群的訊息也會進 webhook——若不判斷來源，等於把該群訊息推回同一群製造回音；因此 gateway 在 inbox payload 帶上 `group_id`（`source.groupId` 或 `roomId`），agent 據此跳過。
+`_forward_offline_message` 走與 escalate 相同的出口（抽出 `_notify_managers` + `_manager_targets`：優先 `LINE_NOTIFY_GROUP_ID`，未設定則查 `line_users` 的 admin，無 admin 才退 employee），訊息含時間／顯示名（alias）／角色／一對一或群組／原文（截 800 字）。bot 本身是通知群成員，故該群的訊息也會進 webhook——若不判斷來源，等於把該群訊息推回同一群製造回音；因此 gateway 在 inbox payload 帶上 `group_id`（`source.groupId` 或 `roomId`），agent 據此跳過。
 _替代方案_：以「角色為 admin/employee 就不轉」代替來源判斷 → 通知群裡的未登錄成員（visitor）仍會造成回音，且會漏掉主管在一對一的提問，否決。
+
+**D6c：主管對象改由 `line_users.role` 決定，不用 contacts 的固定名字。**
+原 `_escalate` 的回退是 `load_contacts().get("sa"/"larry")`，但該 map 的 key 是 LINE 顯示名（實測為 `詹阿瀨 larry`、`廖ㄚ莎✨samantha✨` 等 21 筆），與 alias 不同 → **永遠取不到**。production 的 `LINE_NOTIFY_GROUP_ID` 又是空字串，因此 escalate 通知一直被靜默丟棄，而 log 仍寫著「已通知」。改以 `line_users` 的 role 查（admin 優先、無 admin 才 employee），並讓 `_notify_managers` 回傳實際送達數、0 送達時留 warning——**不可鑑別的通知不能讀起來像成功的通知**。
 
 **D6b：轉發在背景 thread 執行。**
 `send_line` 是 HTTP 呼叫，而 `_on_message` 跑在 MQTT callback thread；先 `_reply()`（僅 MQTT publish，快）再開 thread 轉發，維持與既有 handler 相同的「不阻塞 loop」慣例。
