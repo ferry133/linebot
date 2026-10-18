@@ -22,7 +22,7 @@
 ## 5. 部署（跨 repo）
 
 - [ ] 5.1 ferry133 於 Auth0 建 linebot 專用 Regular Web App，Allowed Callback `https://linebot-admin.jiahd.cc/callback`、Allowed Logout `https://linebot-admin.jiahd.cc/`
-- [ ] 5.2 在 jg-base 開 issue：`linebot/app/secret.yaml` 加 4 個 `${VAR}` 佔位（AUTH0_* ×3、ADMIN_SESSION_SECRET）、`admin.yaml` 以字面值設 `ADMIN_ALLOWED_EMAILS`（非祕密，不經 postBuild）並移除 `ADMIN_USER/ADMIN_PASS` env（署名 `linebot-e6 [609b4b]`）
+- [x] 5.2 在 jg-base 開 issue（ferry133/jg-base#189；`ADMIN_USER/ADMIN_PASS` 移除須在新 image 驗證後——舊 image 缺值會 fallback `admin/changeme`）：`linebot/app/secret.yaml` 加 4 個 `${VAR}` 佔位（AUTH0_* ×3、ADMIN_SESSION_SECRET）、`admin.yaml` 以字面值設 `ADMIN_ALLOWED_EMAILS`（非祕密，不經 postBuild）並移除 `ADMIN_USER/ADMIN_PASS` env（署名 `linebot-e6 [609b4b]`）
 - [ ] 5.3 jg-jiahd `cluster-secrets.sops.yaml` 寫入 4 個值（需 ferry133 確認後操作）
 - [ ] 5.4 PR merge → CI → `bump-linebot-image.sh` → reconcile；實測兩個 email 可登入、其他帳號 403、未登入 API 401
 - [ ] 5.5 驗證完成後移除舊 `ADMIN_USER/ADMIN_PASS` secret 值
