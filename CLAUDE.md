@@ -44,7 +44,7 @@ gateway/line_gateway.py (Flask)
 
 agents/customer_service.py（獨立 process，五步循環 Perceive→Recall→Reason→Act→Reflect）
   ├─ 文字訊息 → Claude agentic loop（model claude-haiku-4-5-20251001, MAX_TOOL_TURNS=5）
-  │    ⚠️ 目前以 `CHAT_ENABLED`（預設 false）**停用**；關閉時一般文字回固定引導訊息
+  │    ⚠️ 目前以 `CHAT_ENABLED`（預設 false）**停用**；關閉時一般文字**靜默不回覆**
   │    （不呼叫 Claude/不查 Trello/不寫記憶）+ 原文轉發 LINE_NOTIFY_GROUP_ID
   │    （來源即該群時不轉，避免回音）；關鍵字與 postback 入口照常
   │    tools: query_trello / get_project_photos / escalate_to_manager

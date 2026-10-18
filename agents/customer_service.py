@@ -91,16 +91,6 @@ def _parse_future_keyword(text: str):
 # 關閉時僅停用「自由對話」fallback；Rich Menu/關鍵字/postback 三入口與工項動作不受影響。
 CHAT_ENABLED = os.environ.get("CHAT_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 
-CHAT_DISABLED_NOTICE = (
-    "目前客服對話功能暫停中，暫時無法以文字問答。\n"
-    "您的訊息已轉交專人，我們會盡快與您聯繫。\n\n"
-    "以下功能仍可使用（請點下方選單）：\n"
-    "・今日提醒：今天要開始/到期的工項\n"
-    "・未來工項：未來或過去區間的工項\n"
-    "・使用說明：各項功能操作指引\n\n"
-    "如需立即協助，也可直接聯繫服務人員。"
-)
-
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOOL_TURNS = 5
 MAX_TOKENS = 2048
@@ -313,11 +303,10 @@ class CustomerServiceAgent:
             log.info(f"[{AGENT_ID}] Future keyword from {user_id[:8]}: {_fut}")
             threading.Thread(target=self._handle_future, args=(user_id, reply_token, _fut[0], _fut[1]), daemon=True).start()
             return
-        # 對話功能關閉 → 固定引導訊息（走既有 Reply 優先出口），不呼叫 Claude、不寫記憶；
-        # 同時把原文轉發主管群組，避免停用期間的提問無人承接（send_line 是網路呼叫 → 背景執行）
+        # 對話功能關閉 → 靜默（不回覆使用者、不呼叫 Claude、不寫記憶）；
+        # 只把原文轉發主管群組，由人接手（send_line 是網路呼叫 → 背景執行）
         if not CHAT_ENABLED:
-            log.info(f"[{AGENT_ID}] Chat disabled; notice to {user_id[:8]}")
-            self._reply(user_id, CHAT_DISABLED_NOTICE, reply_token)
+            log.info(f"[{AGENT_ID}] Chat disabled; muted {user_id[:8]}")
             threading.Thread(target=self._forward_offline_message,
                              args=(user_id, text, payload.get("group_id")), daemon=True).start()
             return

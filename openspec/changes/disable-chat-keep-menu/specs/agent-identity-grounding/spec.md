@@ -2,7 +2,7 @@
 
 ### Requirement: 已知身分者不再被索取身分
 
-本要求 SHALL 僅在客服對話功能啟用（見 `conversation-mode-toggle`）時適用；對話關閉時文字訊息不進入 Claude 流程，改由固定引導訊息承接。
+本要求 SHALL 僅在客服對話功能啟用（見 `conversation-mode-toggle`）時適用；對話關閉時文字訊息不進入 Claude 流程，靜默不回覆、僅轉發主管。
 
 當 `line_users` 已知使用者的角色與其指派專案（系統提示已注入該使用者的進行中專案）時，客服 agent MUST NOT 反問「你是誰／請報名字／請給案場」。對「我／我的案子／我有哪些工作」這類自指問題，agent SHALL 將「我」對應到已注入的專案，並 SHALL 透過 `query_trello` 查詢這些專案作答。身分注入段落 SHALL 明確宣告身分已確認且禁止再詢問。
 
@@ -21,7 +21,7 @@
 
 #### Scenario: 對話關閉時不適用
 - **WHEN** 對話功能關閉且已知身分使用者傳自指問題
-- **THEN** 不進入身分注入與 Claude 查詢流程，回覆固定引導訊息
+- **THEN** 不進入身分注入與 Claude 查詢流程，且不回覆
 
 ### Requirement: 不獎勵未實際查詢的資料型回答
 
