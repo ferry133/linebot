@@ -31,3 +31,10 @@
 - [ ] 4.1 PR → merge main → CI build image（記下 short sha）
 - [ ] 4.2 jg-base：`scripts/bump-linebot-image.sh <sha>` → commit/push → `flux reconcile`（**由使用者確認後執行**，不動 migrate-contacts-job.yaml）
 - [ ] 4.3 叢集驗證：customer-service pod log 出現 `chat=disabled`；LINE 實測一般文字→引導訊息＋主管群收到轉發（log `Forwarded offline msg`）、三格選單→內容正常
+
+## 5. 關閉時改為靜默（2026-10-18 ferry133：「pls simply mute without response」）
+
+- [x] 5.1 移除 `CHAT_DISABLED_NOTICE` 與關閉時的 `_reply()`；轉發主管不變
+- [x] 5.2 spec「關閉時以固定訊息回覆一般文字」→「關閉時對一般文字靜默不回覆」，相關 scenario 同步
+- [x] 5.3 `tests/smoke_chat_toggle.py` 改驗「未送出任何訊息」且仍轉發
+- [ ] 5.4 部署後實測：LINE 傳一般文字 → 無回覆、主管群收到轉發

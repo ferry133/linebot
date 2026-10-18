@@ -88,7 +88,7 @@ for val, expect in [(None, False), ("", False), ("ture", False), ("enabled", Fal
     cs = load(val)
     check(f"CHAT_ENABLED={val!r} → {expect}", cs.CHAT_ENABLED is expect, f"got {cs.CHAT_ENABLED}")
 
-# ── 2. 關閉時：一般文字 → 固定引導訊息，零副作用 ─────────────────────────────
+# ── 2. 關閉時：一般文字 → 靜默不回覆，零副作用 ───────────────────────────────
 print("\n[2] 關閉時的一般文字訊息")
 cs = load(None)
 agent, calls = make_agent(cs)
@@ -97,17 +97,11 @@ route(agent, cs, {"user_id": "U" + "x" * 32, "text": "請問我家工程進度�
       seen, forwarded, done)
 done.wait(3)
 pub = agent.broker.published
-check("只送出一則訊息", len(pub) == 1, str(pub))
-check("走 gateway/outbox", pub and pub[0][0] == cs.OUTBOX_TOPIC, str(pub[:1]))
-check("內容為固定引導訊息", pub and pub[0][1].get("content") == cs.CHAT_DISABLED_NOTICE)
-check("帶 reply_token（免費 Reply）", pub and pub[0][1].get("reply_token") == "RT1")
+check("靜默：未送出任何訊息給使用者", not pub, str(pub))
 check("未進入 _process（Claude loop）", "_process" not in seen, str(seen))
 check("未呼叫 Anthropic", calls["claude"] == 0)
 check("未寫入記憶", calls["memory"] == 0)
 check("未 publish trello 請求", all(t != cs.TRELLO_REQUEST_TOPIC for t, _ in pub))
-check("引導訊息含三個功能名稱",
-      all(k in cs.CHAT_DISABLED_NOTICE for k in ("今日提醒", "未來工項", "使用說明")))
-check("引導訊息說明已轉交專人", "已轉交專人" in cs.CHAT_DISABLED_NOTICE)
 check("原文轉發主管（1 次，含原文與來源）",
       forwarded == [("U" + "x" * 32, "請問我家工程進度到哪了？", None)], str(forwarded))
 
@@ -156,7 +150,7 @@ seen = []
 fwd = []
 route(agent, cs2, {"user_id": "U1", "text": "請問我家工程進度到哪了？", "reply_token": "RT"}, seen, fwd)
 check("進入 _process（Claude loop）", seen == ["_process"], f"seen={seen}")
-check("未送出引導訊息", not agent.broker.published, str(agent.broker.published))
+check("未送出任何訊息", not agent.broker.published, str(agent.broker.published))
 check("未轉發主管（對話開啟時走 escalate 而非轉發）", not fwd, str(fwd))
 
 # ── 6. 轉發主管群組的內容與去回音 ──────────────────────────────────────────

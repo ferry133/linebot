@@ -20,18 +20,18 @@ customer-service agent 啟動時 SHALL 於 log 輸出目前模式（`chat=enable
 - **WHEN** `CHAT_ENABLED` 設為空字串或拼錯的值（如 `ture`、`enabled`）
 - **THEN** 對話功能維持關閉，且不呼叫 Claude
 
-### Requirement: 關閉時以固定訊息回覆一般文字
+### Requirement: 關閉時對一般文字靜默不回覆
 
-對話功能關閉時，收到**未命中保留入口**的文字訊息，系統 SHALL 回覆一則固定引導訊息，內容 SHALL 說明客服對話暫停、SHALL 告知訊息已轉交專人、並 SHALL 指引使用「今日提醒」「未來工項」「使用說明」。該回覆 SHALL 走既有出口（優先 Reply API，失敗才 Push），且 SHALL NOT 讓使用者無回覆。
+對話功能關閉時，收到**未命中保留入口**的文字訊息，系統 SHALL NOT 回覆使用者任何訊息（不使用 Reply API、不 Push）；該訊息僅依「關閉時將來訊轉發主管」轉給主管，由人接手。（2026-10-18 ferry133 裁定：原本的固定引導訊息改為靜默。）
 
-#### Scenario: 一般提問取得引導訊息
+#### Scenario: 一般提問不回覆
 - **WHEN** 對話關閉且使用者傳「請問我家工程進度到哪了？」
-- **THEN** 使用者收到固定引導訊息，內容含三個可用功能名稱與「已轉交專人」說明
-- **THEN** 該回覆使用該次 webhook 的 reply token（免費）送出
+- **THEN** 使用者不會收到任何回覆
+- **THEN** 主管通知群收到該則轉發
 
-#### Scenario: 未知角色也會收到回覆
+#### Scenario: 未知角色同樣靜默
 - **WHEN** 對話關閉且未登錄使用者（visitor）傳送任意文字
-- **THEN** 仍收到同一則固定引導訊息
+- **THEN** 不回覆任何訊息
 
 ### Requirement: 關閉時不得產生對話副作用
 
@@ -52,12 +52,12 @@ customer-service agent 啟動時 SHALL 於 log 輸出目前模式（`chat=enable
 
 當該訊息的來源即主管通知群本身時，系統 SHALL NOT 轉發（避免把該群訊息推回同一群造成回音）；此判定 SHALL 以 gateway 帶入的來源群組/聊天室 id 為依據。
 
-轉發 SHALL NOT 阻塞訊息處理迴圈，且轉發失敗 SHALL NOT 影響已送出的使用者回覆。轉發 log SHALL 記錄**實際送達的對象數**（LINE API 非 200 不計入），並在 0 送達時留下 warning；「因來源為通知群而跳過」SHALL 另有 log。同一出口 SHALL 同時供 `escalate_to_manager` 使用，兩者不得各自維護一份對象清單。
+轉發 SHALL NOT 阻塞訊息處理迴圈，且轉發失敗 SHALL NOT 影響訊息處理。轉發 log SHALL 記錄**實際送達的對象數**（LINE API 非 200 不計入），並在 0 送達時留下 warning；「因來源為通知群而跳過」SHALL 另有 log。同一出口 SHALL 同時供 `escalate_to_manager` 使用，兩者不得各自維護一份對象清單。
 
 #### Scenario: 一對一提問轉給主管群
 - **WHEN** 對話關閉且客戶在一對一傳「浴室磁磚什麼時候貼？」
 - **THEN** 主管通知群收到一則轉發，內含原文、該客戶顯示名/alias、角色與時間
-- **THEN** 客戶本人同時收到固定引導訊息
+- **THEN** 客戶本人不會收到任何回覆
 
 #### Scenario: 來自主管通知群的訊息不轉發
 - **WHEN** 對話關閉且訊息來源群組即 `LINE_NOTIFY_GROUP_ID`
@@ -100,7 +100,7 @@ customer-service agent 啟動時 SHALL 於 log 輸出目前模式（`chat=enable
 
 #### Scenario: 關鍵字備援照常運作
 - **WHEN** 對話關閉且使用者輸入「今日提醒」「使用說明」或「未來兩週工項」
-- **THEN** 回覆對應的 Flex 內容，而非固定引導訊息
+- **THEN** 回覆對應的 Flex 內容（保留入口在關閉時仍會回覆）
 
 #### Scenario: 完成與追認不受影響
 - **WHEN** 對話關閉且廠商點「✅完成」、主管點「確認／退回」
