@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 安裝依賴（與 Dockerfile 一致）
-pip3 install requests flask anthropic psycopg2-binary "paho-mqtt>=2.0" pyyaml pillow pillow-heif
+pip3 install requests flask anthropic psycopg2-binary "paho-mqtt>=2.0" pyyaml pillow pillow-heif authlib==1.9.1
 
 # 各 workload（同一 image，不同進入點；本機需設好環境變數）
 python3 gateway/line_gateway.py        # Flask Webhook + Reply/Push 出口
@@ -122,6 +122,9 @@ CronJob trello-notifier-daily（08:00 Asia/Taipei，週日至週五 0-5）
 | `TRELLO_API_KEY` / `TRELLO_TOKEN` | Trello API 憑證 |
 | `DATABASE_URL` | linebot 專屬 PostgreSQL（與 k8scc 分開）|
 | `CHAT_ENABLED` | 客服自由對話開關；**預設 false（停用）**。恢復：jg-base deploy.yaml 設 `"true"` + rollout。非 `1/true/yes/on` 一律視為關閉（fail-closed）；pod 啟動 log 會印 `chat=enabled|disabled` |
+| `AUTH0_DOMAIN` / `AUTH0_CLIENT_ID` / `AUTH0_CLIENT_SECRET` | admin UI 的 Auth0 登入（linebot 專用 Regular Web App；callback `https://linebot-admin.jiahd.cc/callback`）|
+| `ADMIN_SESSION_SECRET` | admin session cookie 簽章；**未設定則 admin server 拒絕啟動** |
+| `ADMIN_ALLOWED_EMAILS` | admin UI 登入白名單（逗號分隔）；**空＝無人可登入（fail-closed）**。Auth0 只證明身分，這份名單才是閘門 |
 
 ## Agent Memory DB
 

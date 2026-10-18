@@ -13,8 +13,11 @@ import shutil
 import functools
 import logging
 import datetime
+from urllib.parse import urlencode
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, session, redirect, url_for
+from werkzeug.middleware.proxy_fix import ProxyFix
+from authlib.integrations.flask_client import OAuth
 from shared.log import setup as _setup_log
 from shared.db import db_exec, run_migrations
 from shared.exif_gps import extract_gps as _exif_extract_gps
@@ -25,11 +28,39 @@ log = logging.getLogger(__name__)
 run_migrations()
 
 app = Flask(__name__)
+# envoy 終結 TLS；讓 url_for(_external=True) 產生 https://<host>/callback
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge")
 
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "changeme")
+AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
+AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID", "")
+AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET", "")
+# 授權閘門：Auth0 只證明身分，這份名單決定誰能進。空名單 → 無人可登入（fail-closed）。
+ADMIN_ALLOWED_EMAILS = frozenset(
+    e.strip().lower() for e in os.environ.get("ADMIN_ALLOWED_EMAILS", "").split(",") if e.strip()
+)
+
+_session_secret = os.environ.get("ADMIN_SESSION_SECRET", "")
+if not _session_secret:
+    # 不 fallback 隨機值：那會讓重啟後無聲登出，並掩蓋 secret 沒送到 pod 的設定缺漏
+    raise RuntimeError("ADMIN_SESSION_SECRET is not set; refusing to start admin server")
+app.config.update(
+    SECRET_KEY=_session_secret,
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(days=7),
+)
+
+oauth = OAuth(app)
+oauth.register(
+    "auth0",
+    client_id=AUTH0_CLIENT_ID,
+    client_secret=AUTH0_CLIENT_SECRET,
+    server_metadata_url=f"https://{AUTH0_DOMAIN}/.well-known/openid-configuration",
+    client_kwargs={"scope": "openid profile email"},
+)
 
 NAS_MOUNT_PATH = os.environ.get("NAS_MOUNT_PATH", "/mnt/nas/jia.homedesign")
 NAS_ACTIVE_PATH = os.path.join(NAS_MOUNT_PATH, "00. 執行中案場")
@@ -40,17 +71,64 @@ NAS_TEMPLATE_PATH = os.environ.get(
 )
 
 
-# ── Basic Auth ────────────────────────────────────────────────────────────────
+# ── Auth0 login ───────────────────────────────────────────────────────────────
+
+def _is_allowed(email) -> bool:
+    return bool(email) and email.lower() in ADMIN_ALLOWED_EMAILS
+
+
+def current_email():
+    """目前 session 的登入 email；每次都重新比對 allowlist，移出名單即失效。"""
+    email = session.get("email")
+    return email if _is_allowed(email) else None
+
 
 def require_auth(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or auth.username != ADMIN_USER or auth.password != ADMIN_PASS:
-            return Response("Unauthorized", 401,
-                            {"WWW-Authenticate": 'Basic realm="Linebot Admin"'})
+        if not current_email():
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "unauthorized"}), 401
+            return redirect(url_for("login", next=request.full_path.rstrip("?")))
         return f(*args, **kwargs)
     return decorated
+
+
+def _safe_next(target) -> str:
+    # 只接受站內相對路徑，避免 open redirect
+    if target and target.startswith("/") and not target.startswith("//"):
+        return target
+    return "/"
+
+
+@app.get("/login")
+def login():
+    session["next"] = _safe_next(request.args.get("next"))
+    return oauth.auth0.authorize_redirect(url_for("callback", _external=True))
+
+
+@app.get("/callback")
+def callback():
+    token = oauth.auth0.authorize_access_token()
+    userinfo = token.get("userinfo") or {}
+    email = (userinfo.get("email") or "").lower()
+    if userinfo.get("email_verified") is not True or not _is_allowed(email):
+        log.warning("admin login rejected: email=%s verified=%s", email, userinfo.get("email_verified"))
+        session.clear()
+        return Response("Forbidden: 此帳號無權登入", 403)
+    nxt = session.pop("next", "/")
+    session.clear()
+    session.permanent = True
+    session["email"] = email
+    log.info("admin login: %s", email)
+    return redirect(_safe_next(nxt))
+
+
+@app.get("/logout")
+def logout():
+    session.clear()
+    params = urlencode({"returnTo": url_for("index", _external=True), "client_id": AUTH0_CLIENT_ID})
+    return redirect(f"https://{AUTH0_DOMAIN}/v2/logout?{params}")
 
 
 # ── API routes ────────────────────────────────────────────────────────────────
@@ -110,16 +188,9 @@ def update_user(line_id: str):
     if new_role and new_role not in valid_roles:
         return jsonify({"error": f"invalid role: {new_role}"}), 400
 
-    auth_user = request.authorization
-    if new_role == "admin":
-        def _check_caller(conn):
-            with conn.cursor() as cur:
-                cur.execute("SELECT role FROM line_users WHERE display_name = %s", (auth_user.username,))
-                row = cur.fetchone()
-                return row[0] if row else None
-        caller_role = db_exec(_check_caller)
-        if caller_role != "admin":
-            return jsonify({"error": "only admin can assign admin role"}), 403
+    # allowlist 內的登入者即具 admin 權限（require_auth 已擋未登入，這裡是縱深防禦）
+    if new_role == "admin" and not current_email():
+        return jsonify({"error": "only admin can assign admin role"}), 403
 
     alias_in_body = "alias_name" in body
     alias_value = body.get("alias_name") if alias_in_body else None
@@ -990,6 +1061,7 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
 <header>
   <svg width="26" height="26" viewBox="0 0 24 24" fill="white"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>
   <h1>LINE 客服管理</h1>
+  <span style="margin-left:auto;font-size:13px;opacity:.9">__ADMIN_EMAIL__ · <a href="/logout" style="color:#fff">登出</a></span>
 </header>
 <nav>
   <button class="active" onclick="switchTab('users')">用戶管理</button>
@@ -1170,6 +1242,9 @@ input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:#06
 </dialog>
 
 <script>
+// session 過期或被移出名單 → API 回 401，整頁導回登入
+const _fetch=window.fetch;
+window.fetch=async(...a)=>{const r=await _fetch(...a);if(r.status===401)location.href='/login';return r;};
 function esc(s){
   const d=document.createElement('div');
   d.appendChild(document.createTextNode(s==null?'':String(s)));
@@ -1650,7 +1725,8 @@ loadUsers();
 @app.get("/")
 @require_auth
 def index():
-    return HTML
+    import html as _html
+    return HTML.replace("__ADMIN_EMAIL__", _html.escape(current_email()))
 
 
 @app.get("/health")

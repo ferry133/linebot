@@ -20,7 +20,7 @@ COPY agents/ ./agents/
 COPY gateway/ ./gateway/
 COPY docs/ ./docs/
 
-RUN pip install --no-cache-dir requests flask anthropic psycopg2-binary "paho-mqtt>=2.0" pyyaml pillow pillow-heif
+RUN pip install --no-cache-dir requests flask anthropic psycopg2-binary "paho-mqtt>=2.0" pyyaml pillow pillow-heif authlib==1.9.1
 
 # 執行模式（由 k8s workload 的 command 指定）：
 #   LINE Gateway:    python /app/gateway/line_gateway.py
