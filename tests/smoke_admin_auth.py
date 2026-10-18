@@ -99,6 +99,14 @@ m = load("")
 r, e = do_callback(m, {"email": "jiahdadm@gmail.com", "email_verified": True})
 check("empty allowlist fails closed → 403", r.status_code == 403 and e is None, (r.status_code, e))
 
+# ── 偽造 / 過期 callback（真 authlib，不 mock token 交換）→ 400 ──
+m = load(ALLOW)
+c = client(m)
+r = c.get("/callback?code=x&state=forged", base_url=BASE)
+check("forged callback state → 400", r.status_code == 400, r.status_code)
+r = c.get("/callback?error=access_denied&error_description=cancelled", base_url=BASE)
+check("Auth0 error callback → 400", r.status_code == 400, r.status_code)
+
 # ── open redirect ──
 m = load(ALLOW)
 check("_safe_next rejects //evil", m._safe_next("//evil.com") == "/")

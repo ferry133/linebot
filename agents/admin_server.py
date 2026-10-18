@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 from flask import Flask, request, jsonify, Response, session, redirect, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 from authlib.integrations.flask_client import OAuth
+from authlib.integrations.base_client import OAuthError
 from shared.log import setup as _setup_log
 from shared.db import db_exec, run_migrations
 from shared.exif_gps import extract_gps as _exif_extract_gps
@@ -109,7 +110,13 @@ def login():
 
 @app.get("/callback")
 def callback():
-    token = oauth.auth0.authorize_access_token()
+    try:
+        token = oauth.auth0.authorize_access_token()
+    except OAuthError as e:
+        # state 不符／code 無效／使用者在 Auth0 取消 → 400，不是 500
+        log.warning("admin login callback rejected: %s", e.error)
+        session.clear()
+        return Response("Bad Request: 登入流程無效，請重新登入", 400)
     userinfo = token.get("userinfo") or {}
     email = (userinfo.get("email") or "").lower()
     if userinfo.get("email_verified") is not True or not _is_allowed(email):
