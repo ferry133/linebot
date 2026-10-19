@@ -34,7 +34,7 @@ from shared.broker import MQTTBroker
 from shared.db import db_exec
 from trello_line_notifier import (
     TAIPEI, send_line,
-    get_card, parse_tag,
+    get_card, work_item_of_card, work_item_of_checkitem,
     set_checkitem_state, set_card_due_complete, add_card_comment,
     build_daily_messages_for_user,
     build_future_messages_for_user,
@@ -745,17 +745,15 @@ class CustomerServiceAgent:
             for cl in card.get("checklists", []):
                 for it in cl.get("checkItems", []):
                     if it.get("id") == checkitem_id:
-                        parsed = parse_tag(it["name"])
-                        if not parsed:
+                        wi = work_item_of_checkitem(it, card)
+                        if not wi:
                             return None, None, None
-                        names, _, _, _, label = parsed
-                        return names, (label or it["name"]), (it.get("state") == "complete")
+                        return wi["names"], (wi["label"] or it["name"]), wi["complete"]
             return None, None, None
-        parsed = parse_tag((card.get("desc") or "").split("\n")[0])
-        if not parsed:
+        wi = work_item_of_card(card)
+        if not wi:
             return None, None, None
-        names, _, _, _, label = parsed
-        return names, (label or card.get("name", "")), bool(card.get("dueComplete"))
+        return wi["names"], wi["label"], wi["complete"]
 
     def _process_postback(self, user_id: str, pb: dict, reply_token: str | None):
         try:
