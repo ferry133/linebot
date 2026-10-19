@@ -65,9 +65,11 @@ const ymd = d => d ? `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "
 let ctx = load(true);
 let rows = ctx.collectItems_();
 const byLabel = Object.fromEntries(rows.filter(r => r.type === "item").map(r => [r.label, r]));
-const card = byLabel["108.[人造石] 施工"];
-check("卡片列：原生寫法（Trello 日期 11/02–11/03，石凱）",
+const card = rows.find(r => r.type === "card" && r.card === "108.[人造石@(石凱)] 施工");
+check("卡片列：原生寫法合併進卡片摘要列（Trello 日期 11/02–11/03，石凱）",
   card && ymd(card.start) === "20261102" && ymd(card.end) === "20261103" && card.names === "石凱", card);
+check("原生卡片不再另出一列工項", !byLabel["108.[人造石] 施工"], Object.keys(byLabel));
+check("卡片摘要列進度仍只計待辦項（0/2）", card && card.label === "0/2 完成", card && card.label);
 const a = byLabel["丈量 (系統櫃立好後）"];
 check("丈量：繼承石凱，只有結束日 10/21", a && a.names === "石凱" && a.start === null && ymd(a.end) === "20261021", a);
 const b = byLabel["下坎水槽寄送到廠商預先安裝"];
