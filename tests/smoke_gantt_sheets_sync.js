@@ -107,13 +107,39 @@ const NOW = "2026-10-19T12:00:00+08:00";
 let fk = fakeSheet(190, 50);
 ctx = load(true, fk.sheet, NOW);
 ctx.syncTrelloGantt();
-check("今天 10/19 → 甘特至少延到今天後 8 週（34 週，止於 12/19 週六）", vm.runInContext("GANTT_WEEKS", ctx) === 34, vm.runInContext("GANTT_WEEKS", ctx));
-check("欄數不足時補欄（190 → 8+238）", fk.log.inserted === 8 + 34 * 7 - 190, fk.log.inserted);
+const gStart = () => ymd(vm.runInContext("GANTT_START", ctx));
+const gEnd = () => { const d = new Date(vm.runInContext("GANTT_START", ctx)); d.setDate(d.getDate() + vm.runInContext("GANTT_DAYS", ctx) - 1); return d; };
+// 最早未完成：丈量 10/21（10/19 之後）→ 起點不晚於今天 → 今天所在週日 10/18
+check("起點：未完成工項都在今天之後 → 今天那週的週日 10/18", gStart() === "20261018", gStart());
+check("終點：今天後 8 週 → 12/19 週六（9 週）", ymd(gEnd()) === "20261219" && vm.runInContext("GANTT_WEEKS", ctx) === 9, [ymd(gEnd()), vm.runInContext("GANTT_WEEKS", ctx)]);
+check("欄數足夠時不補欄（190 ≥ 8+63）", fk.log.inserted === 0, fk.log.inserted);
+// 逾期未完成 10/01 → 起點回推到 09/28 週日
+CARDS[1].checklists[0].checkItems[0].due = "2026-10-01T06:00:00.000Z";
+CARDS[1].name = "200. [雜項@(阿明)] 清潔";
+ctx = load(true, fakeSheet(190, 50).sheet, NOW);
+ctx.syncTrelloGantt();
+check("起點：逾期未完成 10/01 → 09/27 週日", gStart() === "20260927", gStart());
+// 很久以前的逾期 2026-03-01 → 最多回溯 8 週（08/24）→ 對齊週日 08/23
+CARDS[1].checklists[0].checkItems[0].due = "2026-03-01T06:00:00.000Z";
+ctx = load(true, fakeSheet(190, 50).sheet, NOW);
+ctx.syncTrelloGantt();
+check("起點：最多回溯今天前 8 週 → 08/23 週日", gStart() === "20260823", gStart());
+// 已完成的舊工項不拉早起點
+CARDS[1].checklists[0].checkItems[0].state = "complete";
+ctx = load(true, fakeSheet(190, 50).sheet, NOW);
+ctx.syncTrelloGantt();
+check("起點：已完成的舊工項不影響 → 10/18", gStart() === "20261018", gStart());
+CARDS[1].checklists[0].checkItems[0] = item("I5", "清潔", "2026-10-28T06:00:00.000Z");
+CARDS[1].name = "200. 雜項";
+fk = fakeSheet(10, 50);
+ctx = load(true, fk.sheet, NOW);
+ctx.syncTrelloGantt();
+check("欄數不足時補欄（10 → 8+63）", fk.log.inserted === 8 + 63 - 10, fk.log.inserted);
 CARDS[0].due = "2027-01-20T09:00:00.000Z";   // 工項日期比 today+8w 更晚 → 涵蓋它
 fk = fakeSheet(400, 50);
 ctx = load(true, fk.sheet, NOW);
 ctx.syncTrelloGantt();
-const lastDay = new Date(2026, 3, 26); lastDay.setDate(lastDay.getDate() + vm.runInContext("GANTT_DAYS", ctx) - 1);
+const lastDay = gEnd();
 check("最晚工項 2027-01-20 落在範圍內，終點為週六", ymd(lastDay) >= "20270120" && lastDay.getDay() === 6, ymd(lastDay));
 check("上次較長留下的多餘欄被清掉而不是刪掉", fk.log.inserted === 0 && fk.log.ranges.some(([r, c, nr, nc]) => c === 8 + vm.runInContext("GANTT_DAYS", ctx) + 1 && nc === 400 - 8 - vm.runInContext("GANTT_DAYS", ctx)), fk.log.ranges.slice(0, 3));
 CARDS[0].due = "2062-01-20T09:00:00.000Z";   // 誤植年份 → 上限 104 週

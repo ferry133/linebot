@@ -11,12 +11,14 @@
  *   5. （選用）設定時間觸發：觸發條件 → 新增觸發條件 → syncTrelloGantt → 每天
  *
  * 工作表名稱預設為 "gantt"（可修改下方 SHEET_NAME）
- * 甘特欄：每欄一天，自 GANTT_START 起到最晚工項日期（至少今天後 8 週，上限 104 週），奇偶週交替底色，bar 以狀態色標示
+ * 甘特欄：每欄一天，起點＝最早未完成工項日期（最多回溯今天前 8 週），終點＝最晚工項日期（至少今天後 8 週），上限 104 週；奇偶週交替底色，bar 以狀態色標示
  */
 
 const WORKSPACE_ID = "jiahomedesign1";
 const SHEET_NAME   = "gantt";
-const GANTT_START  = new Date(2026, 3, 26); // 2026-04-26（週日，月份從 0 起算）
+// 起點動態：最早「未完成」工項的日期，但最多回溯到今天前 BACK_WEEKS 週；對齊週日
+const BACK_WEEKS   = 8;
+let GANTT_START    = new Date(2026, 3, 26); // 由 setGanttRange_() 每次同步重算
 // 結束週動態：涵蓋最晚的工項日期，且至少到今天之後 AHEAD_WEEKS 週；上限 MAX_WEEKS 防誤植年份
 const AHEAD_WEEKS  = 8;
 const MAX_WEEKS    = 104;
@@ -48,8 +50,22 @@ const BAND_TODAY = "#f9cb9c";  // 今天欄的底色（橙色）
 
 // ─── 工具函式 ──────────────────────────────────────────────
 
-// 依工項日期與今天重算甘特週數（起點固定 GANTT_START 週日，終點對齊週六）
+// 依工項日期與今天重算甘特範圍（起點對齊週日、終點對齊週六）
 function setGanttRange_(items, today) {
+  // 起點：未完成工項（含卡片摘要列）中最早的日期，不晚於今天、不早於今天前 BACK_WEEKS 週
+  const floor = new Date(today);
+  floor.setDate(floor.getDate() - BACK_WEEKS * 7);
+  let earliest = new Date(today);
+  for (const r of items) {
+    const done = r.type === 'card' ? r.status === "✓ 完成" : r.state === 'complete';
+    if (done) continue;
+    for (const d of [r.start, r.end]) if (d && d < earliest) earliest = d;
+  }
+  const start = new Date(earliest < floor ? floor : earliest);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay());   // 回推到週日
+  GANTT_START = start;
+
   let latest = new Date(today);
   latest.setDate(latest.getDate() + AHEAD_WEEKS * 7);
   for (const r of items) {
