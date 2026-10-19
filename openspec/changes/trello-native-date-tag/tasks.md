@@ -49,7 +49,7 @@
 
 ## 5. 部署與驗證
 
-- [ ] 5.1 PR → merge → CI → jg-base `bump-linebot-image.sh` → reconcile
-- [ ] 5.2 部署後在 pod 內確認 `108.[人造石@(石凱)] 施工` 以 Trello 日期出現在石凱的工項中
+- [x] 5.1 PR → merge → CI → jg-base `bump-linebot-image.sh` → reconcile
+- [x] 5.2 部署後在 pod 內確認 `108.[人造石@(石凱)] 施工` 以 Trello 日期出現在石凱的工項中
 - [ ] 5.2a （人工）使用者將新版 `gantt_sheets_sync.gs` 貼進工期表的 Apps Script，並執行一次 `syncTrelloGantt()`。執行前確認 Script Properties 的 Trello token 屬於 `jiahdoper`（D9）；執行後確認 `108.` 卡的三個待辦項呈現符合 spec
 - [ ] 5.3 使用者以 LINE「今日提醒」或對話查詢實測原生工項（人工）

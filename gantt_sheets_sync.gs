@@ -119,7 +119,7 @@ function workItemOfCard_(card) {
     return {
       names: owners, start: twDate_(card.start), end: twDate_(card.due),
       label: card.name.replace(/@\([^)]+\)/g, "").split(/\s+/).filter(Boolean).join(" "),
-      complete: card.dueComplete === true, company: false,
+      complete: card.dueComplete === true, company: false, native: true,
     };
   }
   const parsed = card.desc ? parseTag_(card.desc.split("\n")[0]) : null;
@@ -290,15 +290,16 @@ function collectItems_() {
       // 無任何標記（no checklist tags, no desc tag）→ 直接跳過
       if (totalCount === 0 && descRow === null) continue;
 
-      // desc-only：desc tag 的日期/名稱直接合併進 card summary row，不單獨輸出
+      // 卡片層級工項合併進 card summary row、不單獨輸出：desc-only，或原生寫法（名稱 @＋Trello 日期，
+      // 卡片列本身就是那筆工項——負責人與日期取卡片，不取待辦項的範圍）
       const isDescOnly  = totalCount === 0 && descRow !== null;
-      const cardNames   = isDescOnly ? descRow.names : '';
-      const finalStart  = isDescOnly ? descRow.start : cardStart;
-      const finalEnd    = isDescOnly ? descRow.end   : cardEnd;
+      const mergeCard   = descRow !== null && (isDescOnly || cardWi.native === true);
+      const cardNames   = mergeCard ? descRow.names : '';
+      const finalStart  = mergeCard ? descRow.start : cardStart;
+      const finalEnd    = mergeCard ? descRow.end   : cardEnd;
 
-      const hasOverdue  = isDescOnly
-        ? (descRow.end && descRow.end < today && !card.dueComplete)
-        : itemRows.some(r => r.end && r.end < today && r.state !== 'complete');
+      const hasOverdue  = (mergeCard && descRow.end && descRow.end < today && !card.dueComplete)
+        || itemRows.some(r => r.end && r.end < today && r.state !== 'complete');
       const allComplete  = card.dueComplete === true || (totalCount > 0 && completeCount === totalCount);
       const isNotStarted = !allComplete && finalStart && finalStart < today && listName.includes("未執行");
       const cardBarColor = allComplete ? BAR_COLORS.complete
@@ -324,7 +325,7 @@ function collectItems_() {
         startOverdue: isNotStarted,
       });
 
-      if (descRow && !isDescOnly) rows.push(descRow);  // 有 checklist items 時才單獨顯示 desc row
+      if (descRow && !mergeCard) rows.push(descRow);  // 舊描述標記＋有 checklist items 時才單獨顯示 desc row
       if (itemRows.length)        rows.push(...itemRows);
     }
   }
