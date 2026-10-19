@@ -91,6 +91,69 @@ function parseTag_(text) {
   return { names, start: parseDate_(m[2]), end: parseDate_(m[3]), label: m[5].trim() };
 }
 
+// ─── 工項定義（與 LINE 通知同一套規則：openspec/specs/work-item-tag）────────
+// Python 版在 trello_line_notifier.py 的 work_item_of_card / work_item_of_checkitem；
+// 兩邊的分支順序刻意一致，改一邊就要改另一邊。
+//   卡片：名稱有 @(代號) 且有 Trello 開始/到期日 → 原生寫法（優先）；否則描述第一行文字標記。
+//   待辦項：文字標記優先；否則要有 due，負責人＝公司帳號（指派成員）> 卡片名稱的 @(代號)。
+
+const COMPANY_LABEL = "公司";
+
+// Trello ISO 時間 → 台北日期（與 parseDate_ 同款的本地 Date，供日期比較）
+function twDate_(iso) {
+  if (!iso) return null;
+  return parseDate_(Utilities.formatDate(new Date(iso), "Asia/Taipei", "yyyyMMdd"));
+}
+
+function cardOwnerNames_(card) {
+  const names = [];
+  const re = /@\(([^)]+)\)/g;
+  let m;
+  while ((m = re.exec(card.name || "")) !== null) names.push(m[1].trim());
+  return names;
+}
+
+function workItemOfCard_(card) {
+  const owners = cardOwnerNames_(card);
+  if (owners.length && (card.start || card.due)) {
+    return {
+      names: owners, start: twDate_(card.start), end: twDate_(card.due),
+      label: card.name.replace(/@\([^)]+\)/g, "").split(/\s+/).filter(Boolean).join(" "),
+      complete: card.dueComplete === true, company: false,
+    };
+  }
+  const parsed = card.desc ? parseTag_(card.desc.split("\n")[0]) : null;
+  if (!parsed) return null;
+  return Object.assign(parsed, { complete: card.dueComplete === true, company: false });
+}
+
+// companyId：公司帳號 member id；null＝查不到 → 有指派成員的待辦項 fail-closed（不列入）
+function workItemOfCheckItem_(item, card, companyId) {
+  const parsed = parseTag_(item.name || "");
+  if (parsed) return Object.assign(parsed, { complete: item.state === "complete", company: false });
+  if (!item.due) return null;                 // 沒有日期 → 不追蹤
+  let company = false;
+  let names = cardOwnerNames_(card);
+  if (item.idMember) {
+    if (!companyId) return null;
+    if (item.idMember === companyId) { company = true; names = []; }
+  }
+  if (!company && !names.length) return null;  // 沒有負責人
+  return { names, start: null, end: twDate_(item.due), label: (item.name || "").trim(),
+           complete: item.state === "complete", company };
+}
+
+// 公司帳號：Script Property COMPANY_MEMBER（username 或 id）優先，否則為 token 擁有者
+function fetchCompanyMemberId_() {
+  const who = PropertiesService.getScriptProperties().getProperty("COMPANY_MEMBER") || "me";
+  try {
+    return trelloGet_(`/members/${encodeURIComponent(who)}`, "fields=id").id;
+  } catch (e) {
+    Logger.log(`公司帳號查詢失敗（${e}）— 指派成員的待辦項本次不列入`);
+    return null;
+  }
+}
+
 // 一次抓取「已註冊負責人」alias 清單（line_users.alias_name，與 LINE 通知同一來源），
 // 回傳小寫 Set 存記憶體供整次同步重用；未設定時回 null（不過濾，graceful）。
 // Script Properties 需設：ALIASES_URL（如 https://<gateway 網域>/aliases）、
@@ -160,54 +223,54 @@ function collectItems_() {
   const validAliases = fetchValidAliases_();
   const hasUnmatchedOwner = (names) =>
     validAliases !== null && names.some(n => !validAliases.has(String(n).toLowerCase()));
+  const companyId = fetchCompanyMemberId_();
+  const ownerText = (wi) => wi.company ? COMPANY_LABEL : wi.names.join("、");
 
   for (const board of boards) {
     if (board.name.includes("母版")) continue;
 
     const lists   = trelloGet_(`/boards/${board.id}/lists`, "fields=name");
     const listMap = Object.fromEntries(lists.map(l => [l.id, l.name]));
-    const cards   = trelloGet_(`/boards/${board.id}/cards`, "checklists=all&fields=name,desc,idList,dueComplete");
+    const cards   = trelloGet_(`/boards/${board.id}/cards`, "checklists=all&checkItem_fields=name,state,due,idMember&fields=name,desc,idList,dueComplete,start,due");
 
     for (const card of cards) {
 
       const listName = listMap[card.idList] || "";
 
-      // Card description tag — 不計入進度統計，但以 item row 形式顯示。
+      // 卡片層級工項（原生 @＋Trello 日期，或描述第一行標記）— 不計入進度統計，但以 item row 形式顯示。
       // 其完成 = 卡片 dueComplete（與通知一致），否則 dueComplete 的完成卡會被誤判逾期。
       let descRow = null;
-      if (card.desc) {
-        const parsed = parseTag_(card.desc.split("\n")[0]);
-        if (parsed && !hasUnmatchedOwner(parsed.names)) {
-          descRow = {
-            type:  'item',
-            board: board.name,
-            list:  listName,
-            card:  card.name,
-            label: parsed.label,
-            names: parsed.names.join("、"),
-            start: parsed.start,
-            end:   parsed.end,
-            state: card.dueComplete ? 'complete' : 'incomplete',
-          };
-        }
+      const cardWi = workItemOfCard_(card);
+      if (cardWi && !hasUnmatchedOwner(cardWi.names)) {
+        descRow = {
+          type:  'item',
+          board: board.name,
+          list:  listName,
+          card:  card.name,
+          label: cardWi.label,
+          names: ownerText(cardWi),
+          start: cardWi.start,
+          end:   cardWi.end,
+          state: cardWi.complete ? 'complete' : 'incomplete',
+        };
       }
 
-      // Checklist 項目（有 [@...] 標記的）
+      // Checklist 工項（文字標記，或有 due 的待辦項；公司負責者不受查無對應過濾）
       const itemRows = [];
       for (const cl of (card.checklists || [])) {
         for (const item of (cl.checkItems || [])) {
-          const parsed = parseTag_(item.name);
-          if (!parsed) continue;
-          if (hasUnmatchedOwner(parsed.names)) continue;  // 負責人未在用戶管理(查無對應)→ 不列入
+          const wi = workItemOfCheckItem_(item, card, companyId);
+          if (!wi) continue;
+          if (hasUnmatchedOwner(wi.names)) continue;  // 負責人未在用戶管理(查無對應)→ 不列入
           itemRows.push({
             type:  'item',
             board: board.name,
             list:  listName,
             card:  card.name,
-            label: parsed.label,
-            names: parsed.names.join("、"),
-            start: parsed.start,
-            end:   parsed.end,
+            label: wi.label,
+            names: ownerText(wi),
+            start: wi.start,
+            end:   wi.end,
             state: item.state,
           });
         }

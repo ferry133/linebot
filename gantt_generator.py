@@ -11,7 +11,6 @@
 
 import os
 import csv
-import re
 import requests
 from datetime import date, datetime, timedelta
 try:
@@ -24,26 +23,13 @@ TRELLO_KEY = os.environ.get("TRELLO_API_KEY", "")
 TRELLO_TOKEN = os.environ.get("TRELLO_TOKEN", "")
 WORKSPACE_ID = "jiahomedesign1"
 
-ITEM_RE = re.compile(
-    r"\[@((?:@?\([^)]+\))+),\s*(\d{8})?-?(\d{8})?(?::(\d{4}))?\](.+)"
-)
-NAME_RE = re.compile(r"\(([^)]+)\)")
+# 工項定義與 LINE 通知共用（spec work-item-tag）：文字標記＋Trello 原生日期
+from trello_line_notifier import work_item_of_card, work_item_of_checkitem, COMPANY_LABEL
 
 # 甘特圖時間範圍：26 週，從 2026-04-26（週日）起
 GANTT_START = date(2026, 4, 26)
 GANTT_WEEKS = 26
 WEEKS = [GANTT_START + timedelta(weeks=i) for i in range(GANTT_WEEKS)]
-
-
-def parse_tag(text):
-    m = ITEM_RE.match(text.strip())
-    if not m:
-        return None
-    names = NAME_RE.findall(m.group(1))
-    start = datetime.strptime(m.group(2), "%Y%m%d").date() if m.group(2) else None
-    end = datetime.strptime(m.group(3), "%Y%m%d").date() if m.group(3) else None
-    label = m.group(5).strip()
-    return names, start, end, label
 
 
 def get_boards():
@@ -68,7 +54,8 @@ def get_cards(board_id):
         "key": TRELLO_KEY,
         "token": TRELLO_TOKEN,
         "checklists": "all",
-        "fields": "name,desc,idList,dueComplete",
+        "checkItem_fields": "name,state,due,idMember",
+        "fields": "name,desc,idList,dueComplete,start,due",
     }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
@@ -123,44 +110,23 @@ def collect_items():
         for card in cards:
             list_name = list_map.get(card.get("idList", ""), "")
 
-            # Card description 第一行
-            if card.get("desc"):
-                first_line = card["desc"].split("\n")[0]
-                parsed = parse_tag(first_line)
-                if parsed and not _unmatched(parsed[0]):
-                    names, start, end, label = parsed
-                    rows.append({
-                        "board": board_name,
-                        "list": list_name,
-                        "card": card["name"],
-                        "label": label,
-                        "names": "、".join(names),
-                        "start": start,
-                        "end": end,
-                        # card 層級工項完成 = 卡片 dueComplete（與通知邏輯一致），
-                        # 否則 dueComplete 的完成卡會被誤判逾期。
-                        "state": "complete" if card.get("dueComplete") else "incomplete",
-                    })
-
-            # Checklist 項目
-            for checklist in card.get("checklists", []):
-                for item in checklist.get("checkItems", []):
-                    parsed = parse_tag(item["name"])
-                    if not parsed:
-                        continue
-                    if _unmatched(parsed[0]):
-                        continue
-                    names, start, end, label = parsed
-                    rows.append({
-                        "board": board_name,
-                        "list": list_name,
-                        "card": card["name"],
-                        "label": label,
-                        "names": "、".join(names),
-                        "start": start,
-                        "end": end,
-                        "state": item["state"],
-                    })
+            # 卡片層級（原生 `@`＋Trello 日期，或描述第一行）＋待辦項；完成狀態由工項定義給出
+            wis = [work_item_of_card(card)] + [work_item_of_checkitem(item, card)
+                                               for checklist in card.get("checklists", [])
+                                               for item in checklist.get("checkItems", [])]
+            for wi in wis:
+                if not wi or _unmatched(wi["names"]):
+                    continue
+                rows.append({
+                    "board": board_name,
+                    "list": list_name,
+                    "card": card["name"],
+                    "label": wi["label"],
+                    "names": COMPANY_LABEL if wi["company"] else "、".join(wi["names"]),
+                    "start": wi["start"],
+                    "end": wi["end"],
+                    "state": "complete" if wi["complete"] else "incomplete",
+                })
 
     return rows
 

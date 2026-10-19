@@ -153,11 +153,25 @@ manifests 在 **`jg-base`**：`kubernetes/apps/extras/default/linebot/`（gatewa
 
 ## Trello 標記格式
 
-只有含 `[@(姓名/alias),日期區間]` 標記的項目才觸發通知/可見性邏輯（alias 對應 `line_users.alias_name`）：
+「工項」才觸發通知與可見性邏輯（alias 對應 `line_users.alias_name`）。工項有兩種寫法，定義見 spec `work-item-tag`，程式入口是 `work_item_of_card` / `work_item_of_checkitem`，所有讀取點都走這兩個函式。
+
+**1. 文字標記**：寫在卡片描述第一行或待辦項名稱的開頭。
 
 ```
 [@(曾宇晟),20260501-20260530:1800] 拆除舊有磁磚
 [@(Larry)@(SA),-20260530] 防水層施工驗收
 ```
+
+**2. Trello 原生日期**（2026-10 起）：
+
+| | 負責人 | 日期 |
+|---|---|---|
+| 卡片 | 名稱中的 `@(代號)`，例如 `108.[人造石@(石凱)] 施工`，稱為**卡片負責人** | 卡片的開始日與到期日 |
+| 待辦項（不必寫標記） | 指派成員是**公司帳號**（Trello token 擁有者 `jiahdoper`）時歸「公司」，提醒管理者與員工；否則為卡片負責人；兩者皆無則不算工項 | 只有到期日（Trello 待辦項沒有開始日），**沒有到期日的不追蹤** |
+
+- 卡片同時有兩種寫法時，**以原生寫法為準**，描述標記會被忽略。
+- 待辦項是文字標記時，照文字解析，不看到期日與指派成員。
+- 卡片名稱有 `@(代號)` 卻沒設日期，屬於錯誤設定：卡片本身不算工項，並列入主管每日摘要的警告「⚠️ 卡片已指定負責人但未設日期」。
+- 工期表 `gantt_sheets_sync.gs`（Apps Script）以 JS 實作同一套規則，**改規則時兩邊都要改**；修改後要手動貼回 Apps Script。測試：`node tests/smoke_gantt_sheets_sync.js`、`python3 tests/smoke_work_item_tag.py`。
 
 `chatBarText` 等 LINE 限制：Rich Menu chatBarText ≤ 14 字元。

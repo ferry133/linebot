@@ -49,6 +49,9 @@ _unresolved_aliases: dict[str, set[str]] = {}
 # per-run 收集器：所有檢查項皆完成、但卡片不在「已完成」欄的 "board/card"。morning render。
 _complete_unfiled: list[str] = []
 
+# per-run 收集器：名稱有 `@(代號)` 卻沒設 Trello 日期的 "board/list/card"（錯誤設定）。
+_owner_no_date: list[str] = []
+
 
 def _resolve_tag_recipients(names: list[str], source: str | None = None,
                             record_unresolved: bool = True) -> list[str]:
@@ -236,7 +239,8 @@ def get_cards(board_id):
         "key": TRELLO_KEY,
         "token": TRELLO_TOKEN,
         "checklists": "all",
-        "fields": "name,desc,dateLastActivity,idList,dueComplete",
+        "checkItem_fields": "name,state,due,idMember",
+        "fields": "name,desc,dateLastActivity,idList,dueComplete,start,due",
     }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
@@ -248,7 +252,8 @@ def get_card(card_id):
     url = f"https://api.trello.com/1/cards/{card_id}"
     params = {
         "key": TRELLO_KEY, "token": TRELLO_TOKEN,
-        "checklists": "all", "fields": "name,desc,idBoard,idList,dueComplete",
+        "checklists": "all", "checkItem_fields": "name,state,due,idMember",
+        "fields": "name,desc,idBoard,idList,dueComplete,start,due",
     }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
@@ -294,9 +299,10 @@ def get_board_full(board_id: str) -> dict:
         "lists": "open",
         "list_fields": "name",
         "cards": "open",
-        "card_fields": "name,desc,dateLastActivity,idList,dueComplete",
+        "card_fields": "name,desc,dateLastActivity,idList,dueComplete,start,due",
         "checklists": "all",
         "checklist_fields": "name,idCard",
+        "checkItem_fields": "name,state,due,idMember",
         "fields": "name",
     }
     resp = requests.get(url, params=params)
@@ -347,6 +353,107 @@ def parse_tag(text):
     end_time = datetime.strptime(m.group(4), "%H%M").time() if m.group(4) else None
     label = m.group(5).strip()
     return names, start, end, end_time, label
+
+
+# ── 工項定義（spec work-item-tag）────────────────────────────────────────────
+# 兩種寫法：文字標記 `[@(代號),日期區間] 說明`，以及 Trello 原生日期——卡片名稱的
+# `@(代號)` 是卡片負責人，日期取卡片 start/due；卡內有 due 的待辦項繼承卡片負責人，
+# 指派給公司帳號（Trello token 擁有者）者歸公司。所有讀取點一律經由下列兩個函式。
+
+OWNER_RE = re.compile(r"@\(([^)]+)\)")
+COMPANY_LABEL = "公司"
+_company_member: dict = {"id": None}
+
+
+def company_member_id():
+    """公司帳號（Trello token 擁有者，目前為 jiahdoper）的 member id；取不到回 None（下次重試）。"""
+    if _company_member["id"] is None:
+        try:
+            resp = requests.get("https://api.trello.com/1/members/me",
+                                params={**_trello_auth(), "fields": "id"}, timeout=10)
+            resp.raise_for_status()
+            _company_member["id"] = resp.json()["id"]
+        except Exception as e:
+            print(f"[notifier] WARNING: cannot resolve company member (/members/me): {e}")
+    return _company_member["id"]
+
+
+def card_owner_names(card) -> list[str]:
+    """卡片負責人：卡片名稱中所有 `@(代號)`（小寫）。"""
+    return [n.strip().lower() for n in OWNER_RE.findall(card.get("name") or "")]
+
+
+def card_owner_missing_dates(card) -> bool:
+    """名稱有 `@(代號)` 卻沒設任何 Trello 日期 → 錯誤設定（每日摘要警告）。"""
+    return bool(card_owner_names(card)) and not (card.get("start") or card.get("due"))
+
+
+def _tw_dt(iso):
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TAIPEI) if iso else None
+
+
+def _native_raw(names, start, end, end_time, label, company=False):
+    """原生寫法沒有原始標記文字 → 合成與文字標記同款的呈現（摘要/通知顯示用）。"""
+    who = "".join(f"@({n})" for n in ([COMPANY_LABEL] if company else names))
+    period = (start.strftime("%Y%m%d") if start else "") + "-" + (end.strftime("%Y%m%d") if end else "")
+    if end_time:
+        period += ":" + end_time.strftime("%H%M")
+    return f"[{who},{period}] {label}"
+
+
+def _work_item(names, start, end, end_time, label, raw, complete, source, company=False):
+    return {"names": names, "start": start, "end": end, "end_time": end_time,
+            "label": label, "raw": raw, "complete": complete, "source": source,
+            "company": company}
+
+
+def work_item_of_card(card):
+    """卡片層級工項或 None。原生（名稱 `@` + Trello 日期）優先，否則描述第一行文字標記。"""
+    owners = card_owner_names(card)
+    complete = bool(card.get("dueComplete"))
+    if owners and (card.get("start") or card.get("due")):
+        s, d = _tw_dt(card.get("start")), _tw_dt(card.get("due"))
+        start = s.date() if s else None
+        end = d.date() if d else None
+        end_time = d.time().replace(second=0, microsecond=0) if d else None
+        label = " ".join(OWNER_RE.sub("", card["name"]).split())
+        return _work_item(owners, start, end, end_time, label,
+                          _native_raw(owners, start, end, end_time, label), complete, "card_native")
+    first_line = (card.get("desc") or "").split("\n")[0]
+    parsed = parse_tag(first_line)
+    if not parsed:
+        return None
+    names, start, end, end_time, label = parsed
+    return _work_item(names, start, end, end_time, label or card.get("name", ""),
+                      first_line.strip(), complete, "card_desc")
+
+
+def work_item_of_checkitem(item, card):
+    """待辦項工項或 None。文字標記優先；否則需有 due，負責人＝公司帳號 > 卡片負責人。"""
+    complete = item.get("state") == "complete"
+    parsed = parse_tag(item.get("name") or "")
+    if parsed:
+        names, start, end, end_time, label = parsed
+        return _work_item(names, start, end, end_time, label, item["name"].strip(), complete, "checklist")
+    d = _tw_dt(item.get("due"))
+    if not d:
+        return None   # 沒有日期 → 不追蹤
+    member = item.get("idMember")
+    company = False
+    names = card_owner_names(card)
+    if member:
+        cid = company_member_id()
+        if cid is None:
+            return None   # fail-closed：判斷不了是不是公司帳號 → 寧可漏提醒，不可提醒錯人
+        if member == cid:
+            company, names = True, []
+    if not company and not names:
+        return None   # 沒有負責人
+    end, end_time = d.date(), d.time().replace(second=0, microsecond=0)
+    label = (item.get("name") or "").strip()
+    return _work_item(names, None, end, end_time, label,
+                      _native_raw(names, None, end, end_time, label, company), complete, "checklist",
+                      company)
 
 
 def days_diff(d, ref=None):
@@ -584,6 +691,7 @@ def run_checks(as_of=None):
     as_of = as_of or today_tw()
     _unresolved_aliases.clear()
     _complete_unfiled.clear()
+    _owner_no_date.clear()
     from collections import defaultdict
     contacts = load_contacts()
     internal = _internal_recipients()  # 所有管理者/員工 — #3–#7、#9 內部收件人
@@ -604,45 +712,37 @@ def run_checks(as_of=None):
             card_has_check = False      # 此卡是否有帶標記的檢查項
             card_all_complete = True    # 其所有檢查項是否皆完成（打勾）
 
-            if card.get("desc"):
-                first_line = card["desc"].split("\n")[0]
-                parsed = parse_tag(first_line)
-                if parsed:
-                    card_has_check = True
-                    is_complete = bool(card.get("dueComplete"))
-                    if not is_complete:
-                        card_all_complete = False
-                    names, start, end, end_time, label = parsed
-                    if not label:
-                        label = card["name"]
-                    sponsors = check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], first_line.strip(), notifications, internal, is_complete=is_complete,
-                               board_id=board["id"], card_id=card["id"], checkitem_id=None, source="card", as_of=as_of)
-                    if _in_summary(start, end, is_complete, as_of):
-                        overdue = _summary_overdue(start, end, as_of)
-                        for uid in (set(sponsors) | internal_set):
-                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue, first_line.strip()))
+            if card_owner_missing_dates(card) and not card.get("dueComplete"):
+                _owner_no_date.append(f"{board_name}/{list_name}/{card['name']}")
+
+            def _track(wi, checkitem_id, source):
+                """一筆工項：#1–#6 通知 + #9 摘要。公司負責（names 空）→ 只到 internal。"""
+                nonlocal card_has_check, card_all_complete
+                card_has_check = True
+                if not wi["complete"]:
+                    card_all_complete = False
+                sponsors = check_item(wi["names"], wi["start"], wi["end"], wi["end_time"], wi["label"], contacts, board_name, list_name, card["name"], wi["raw"], notifications, internal, is_complete=wi["complete"],
+                           board_id=board["id"], card_id=card["id"], checkitem_id=checkitem_id, source=source, as_of=as_of)
+                if _in_summary(wi["start"], wi["end"], wi["complete"], as_of):
+                    overdue = _summary_overdue(wi["start"], wi["end"], as_of)
+                    for uid in (set(sponsors) | internal_set):
+                        summary_by_uid[uid].append((board_name, list_name, card["name"], wi["label"], overdue, wi["raw"]))
+
+            wi = work_item_of_card(card)
+            if wi:
+                _track(wi, None, "card")
 
             for checklist in card.get("checklists", []):
                 items = checklist.get("checkItems", [])
-                has_tag = False
+                tracked = []
                 for item in items:
-                    parsed = parse_tag(item["name"])
-                    if not parsed:
+                    wi = work_item_of_checkitem(item, card)
+                    if not wi:
                         continue
-                    has_tag = True
-                    card_has_check = True
-                    is_complete = (item.get("state") == "complete")
-                    if not is_complete:
-                        card_all_complete = False
-                    names, start, end, end_time, label = parsed
-                    sponsors = check_item(names, start, end, end_time, label, contacts, board_name, list_name, card["name"], item["name"].strip(), notifications, internal, is_complete=is_complete,
-                               board_id=board["id"], card_id=card["id"], checkitem_id=item["id"], source="checklist", as_of=as_of)
-                    if _in_summary(start, end, is_complete, as_of):
-                        overdue = _summary_overdue(start, end, as_of)
-                        for uid in (set(sponsors) | internal_set):
-                            summary_by_uid[uid].append((board_name, list_name, card["name"], label, overdue, item["name"].strip()))
+                    tracked.append(wi)
+                    _track(wi, item["id"], "checklist")
 
-                if not has_tag:
+                if not tracked:
                     continue
 
                 # #7 停滯（內部）— 停滯天數相對基準日（someday 投影）
@@ -657,17 +757,13 @@ def run_checks(as_of=None):
                             if uid:
                                 notifications.append((uid, board_name, rec))
 
-                # #8 全部完成
+                # #8 全部完成 → 卡片負責人；卡片無負責人時取第一筆有負責人的工項
                 if items and all(i["state"] == "complete" for i in items):
-                    for item in items:
-                        parsed = parse_tag(item["name"])
-                        if parsed:
-                            names, _, _, _, _ = parsed
-                            sponsors = [contacts[n] for n in names if n in contacts]
-                            rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card", "")
-                            for uid in sponsors:
-                                notifications.append((uid, board_name, rec))
-                            break
+                    names = card_owner_names(card) or next((w["names"] for w in tracked if w["names"]), [])
+                    sponsors = [contacts[n] for n in names if n in contacts]
+                    rec = ("item", "#388E3C", "所有工項已全部完成 ✓", f"{list_name}/{card['name']}", "", "", "", None, "card", "")
+                    for uid in sponsors:
+                        notifications.append((uid, board_name, rec))
 
             # 完成但未歸欄：整張卡所有檢查項皆完成、卻不在「已完成」欄 → minor 警告（morning render）
             if card_has_check and card_all_complete and "已完成" not in list_name:
@@ -692,6 +788,8 @@ def run_checks(as_of=None):
         warnings.append(("⚠️ 查無對應 LINE 帳號（未發送通知）", tuple(wlines)))
     if _complete_unfiled:
         warnings.append(("✅ 已完成但未歸『已完成』欄（請移動卡片）", tuple(f"・{s}" for s in _complete_unfiled)))
+    if _owner_no_date:
+        warnings.append(("⚠️ 卡片已指定負責人但未設日期（請在 Trello 設定日期）", tuple(f"・{s}" for s in _owner_no_date)))
     warnings = tuple(warnings)
 
     # 每個收件人一則 summary rec；空 sections 且無警告者不附（維持 skip-empty）
@@ -1006,7 +1104,7 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
     label_map = _all_project_names()
     tasks = []  # (public, card_name, short_label, alias, start, end, sort_date)；每任務一筆、精簡一行
 
-    def _consider(names, start, end, label, is_complete, public, card_name):
+    def _consider(names, start, end, label, is_complete, public, card_name, company=False):
         if is_complete:
             return
         if oa is not None and oa not in [n.lower() for n in names]:
@@ -1021,7 +1119,7 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
         short = (label or "").split("：")[0].split(":")[0].strip()   # 去掉冗長說明，只留短名
         if len(short) > 18:
             short = short[:18] + "…"
-        alias = ("@" + "@".join(names)) if names else ""
+        alias = f"@{COMPANY_LABEL}" if company else (("@" + "@".join(names)) if names else "")
         tasks.append((public, card_name, short, alias, start, end, sd))
 
     for board in _scan_boards():
@@ -1029,18 +1127,12 @@ def build_future_messages_for_user(direction, days, allowed_board_ids, owner_ali
             continue
         public = label_map.get(board["id"]) or "（未登錄專案）"
         for card in board["cards"]:
-            if card.get("desc"):
-                p = parse_tag(card["desc"].split("\n")[0])
-                if p:
-                    names, start, end, _et, label = p
-                    _consider(names, start, end, label, bool(card.get("dueComplete")), public, card["name"])
-            for cl in card.get("checklists", []):
-                for it in cl.get("checkItems", []):
-                    p = parse_tag(it["name"])
-                    if not p:
-                        continue
-                    names, start, end, _et, label = p
-                    _consider(names, start, end, label, it.get("state") == "complete", public, card["name"])
+            wis = [work_item_of_card(card)] + [work_item_of_checkitem(it, card)
+                                               for cl in card.get("checklists", []) for it in cl.get("checkItems", [])]
+            for wi in wis:
+                if wi:
+                    _consider(wi["names"], wi["start"], wi["end"], wi["label"], wi["complete"], public, card["name"],
+                              wi["company"])
 
     tasks.sort(key=lambda t: t[6])
     truncated = len(tasks) > _FUTURE_MAX_EVENTS

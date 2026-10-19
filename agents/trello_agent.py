@@ -22,7 +22,8 @@ from trello_line_notifier import (
     TAIPEI,
     WORKSPACE_ID,
     get_boards_batch,
-    parse_tag,
+    work_item_of_card,
+    work_item_of_checkitem,
     days_diff,
 )
 
@@ -107,28 +108,28 @@ class TrelloAgent:
             board_name = name_map.get(board["id"], board["name"])
             for card in board["cards"]:
                 list_name = board["lists"].get(card.get("idList", ""), "")
-                if card.get("desc"):
-                    parsed = parse_tag(card["desc"].split("\n")[0])
-                    if parsed:
-                        names, start, end, end_time, label = parsed
-                        items.append({
-                            "board": board_name, "board_id": board["id"], "list": list_name,
-                            "card": card["name"], "label": label or card["name"],
-                            "names": names, "start": str(start), "end": str(end),
-                            "source": "card_desc",
-                        })
+                wi = work_item_of_card(card)
+                if wi:
+                    items.append({
+                        "board": board_name, "board_id": board["id"], "list": list_name,
+                        "card": card["name"], "label": wi["label"],
+                        "names": wi["names"], "start": str(wi["start"]), "end": str(wi["end"]),
+                        "source": wi["source"],
+                    })
                 for cl in card.get("checklists", []):
                     for it in cl.get("checkItems", []):
-                        parsed = parse_tag(it["name"])
-                        if not parsed:
+                        wi = work_item_of_checkitem(it, card)
+                        if not wi:
                             continue
-                        names, start, end, end_time, label = parsed
-                        items.append({
+                        item = {
                             "board": board_name, "board_id": board["id"], "list": list_name,
-                            "card": card["name"], "label": label,
-                            "names": names, "start": str(start), "end": str(end),
+                            "card": card["name"], "label": wi["label"],
+                            "names": wi["names"], "start": str(wi["start"]), "end": str(wi["end"]),
                             "state": it["state"], "source": "checklist",
-                        })
+                        }
+                        if wi["company"]:
+                            item["owner"] = "公司"   # 指派給公司帳號；names 空 → 廠商 owner 過濾看不到
+                        items.append(item)
 
         self._cache["items"] = items
         self._cache["ts"] = time.monotonic()
