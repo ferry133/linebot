@@ -11,14 +11,17 @@
  *   5. （選用）設定時間觸發：觸發條件 → 新增觸發條件 → syncTrelloGantt → 每天
  *
  * 工作表名稱預設為 "gantt"（可修改下方 SHEET_NAME）
- * 甘特欄：每欄一天，26 週共 182 欄，奇偶週交替底色，bar 以狀態色標示
+ * 甘特欄：每欄一天，自 GANTT_START 起到最晚工項日期（至少今天後 8 週，上限 104 週），奇偶週交替底色，bar 以狀態色標示
  */
 
 const WORKSPACE_ID = "jiahomedesign1";
 const SHEET_NAME   = "gantt";
 const GANTT_START  = new Date(2026, 3, 26); // 2026-04-26（週日，月份從 0 起算）
-const GANTT_WEEKS  = 26;
-const GANTT_DAYS   = GANTT_WEEKS * 7;      // 182 天
+// 結束週動態：涵蓋最晚的工項日期，且至少到今天之後 AHEAD_WEEKS 週；上限 MAX_WEEKS 防誤植年份
+const AHEAD_WEEKS  = 8;
+const MAX_WEEKS    = 104;
+let GANTT_WEEKS    = 26;                   // 由 setGanttRange_() 每次同步重算
+let GANTT_DAYS     = GANTT_WEEKS * 7;
 
 const DOW_ZH = ["日","一","二","三","四","五","六"];
 
@@ -44,6 +47,18 @@ const BAND_TODAY = "#f9cb9c";  // 今天欄的底色（橙色）
 
 
 // ─── 工具函式 ──────────────────────────────────────────────
+
+// 依工項日期與今天重算甘特週數（起點固定 GANTT_START 週日，終點對齊週六）
+function setGanttRange_(items, today) {
+  let latest = new Date(today);
+  latest.setDate(latest.getDate() + AHEAD_WEEKS * 7);
+  for (const r of items) {
+    for (const d of [r.start, r.end]) if (d && d > latest) latest = d;
+  }
+  const spanDays = Math.round((latest - GANTT_START) / 86400000) + 1;
+  GANTT_WEEKS = Math.min(MAX_WEEKS, Math.max(1, Math.ceil(spanDays / 7)));
+  GANTT_DAYS  = GANTT_WEEKS * 7;
+}
 
 function getDays_() {
   const days = [];
@@ -340,10 +355,26 @@ function collectItems_() {
 function syncTrelloGantt() {
   const ss    = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
-  const days  = getDays_();
   const TZ    = "Asia/Taipei";
   const fmt   = (d, f) => Utilities.formatDate(d, TZ, f);
   const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  // 取得最新 Trello 資料（card summary rows + item rows），並依其日期決定甘特範圍
+  const items = collectItems_();
+  setGanttRange_(items, today);
+  const days  = getDays_();
+
+  // 欄數不足 → 補欄；上次範圍較長留下的多餘欄 → 清掉內容、底色與合併（不刪欄）
+  const needCols = 8 + GANTT_DAYS;
+  const maxCols  = sheet.getMaxColumns();
+  if (maxCols < needCols) {
+    sheet.insertColumnsAfter(maxCols, needCols - maxCols);
+  } else if (maxCols > needCols) {
+    const extra = sheet.getRange(1, needCols + 1, Math.max(sheet.getLastRow(), 2), maxCols - needCols);
+    extra.breakApart();
+    extra.clearContent();
+    extra.setBackground("#ffffff");
+  }
 
   // 凍結標題列與左側資訊欄
   sheet.setFrozenRows(2);
@@ -393,8 +424,6 @@ function syncTrelloGantt() {
     sheet.showRows(3, lastRow - 2);
   }
 
-  // 取得最新 Trello 資料（card summary rows + item rows）
-  const items = collectItems_();
   if (items.length === 0) {
     sheet.getRange(3, 1).setValue("（無符合標記的工項）");
     return;
