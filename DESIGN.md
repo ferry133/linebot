@@ -44,12 +44,12 @@ LINE Platform
 │  └─ 依 allowed_boards 過濾後回覆                    │
 │                                                     │
 │  linebot-admin (Flask)                              │
-│  └─ 管理 contacts.json（聯絡人/權限）                │
+│  └─ 管理 line_users / projects（聯絡人/權限）        │
 └─────────────────────────────────────────────────────┘
     │
     ▼ NFS mount
 NAS1:/volume2/knowledge/
-    ├─ contacts.json
+    ├─ contacts.json   (legacy，僅 notifier DB 失敗退路)
     ├─ project_photos.yaml
     └─ *.md (知識庫)
 
@@ -57,6 +57,7 @@ NAS1:/volume2/knowledge/
     ├─ working_memory  (對話記憶)
     ├─ knowledge       (語意記憶)
     ├─ episodes        (情節記憶)
+    ├─ line_users / projects / line_user_projects  (聯絡人與權限)
     └─ trello_boards   (看板 ID ↔ 名稱快取)
 ```
 
@@ -147,7 +148,7 @@ Reflect   → 評估回答品質，寫入 episodes；若品質高，萃取 knowl
 
 ```
 NAS1:/volume2/knowledge/
-├── contacts.json          # 聯絡人 & 權限（唯一真相來源）
+├── contacts.json          # legacy；聯絡人與權限已改存 DB（見 4.2）
 ├── project_photos.yaml    # 工地相簿連結
 ├── 01_service_process.md  # 服務流程
 ├── 02_construction_steps.md
@@ -159,26 +160,18 @@ NAS1:/volume2/knowledge/
 
 所有 `.md` 檔在 agent 啟動時自動載入為 system prompt 的「室內裝修知識庫」區塊。
 
-### 4.2 contacts.json 格式
+### 4.2 聯絡人與權限（DB）
 
-```json
-{
-  "Larry": {
-    "line_id": "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "projects": "*"
-  },
-  "王小明": {
-    "line_id": "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    "projects": ["王小明_信義路三段"]
-  }
-}
-```
+聯絡人與權限以 DB 為準，**不再讀 contacts.json**：
 
-| `projects` | 意義 |
-|------------|------|
-| `"*"` | 員工/管理員，可查詢所有工地 |
-| `["看板名稱"]` | 客戶，只能查詢指定看板 |
-| 未列出此 LINE ID | 無查詢權限 |
+| Table | 內容 |
+|-------|------|
+| `line_users` | `line_id`、`display_name`、`alias_name`、`role`（admin / employee / vendor / customer / visitor） |
+| `projects` | 專案（`trello_board_id`、`status`、對外標籤欄位） |
+| `line_user_projects` | 使用者 ↔ 專案指派（customer 可見範圍） |
+
+- **建檔**：使用者首次傳訊時 gateway 自動 upsert `line_users`；角色、alias、專案指派在 admin UI 維護。
+- **contacts.json 為 legacy**：早期以 `agents/migrate_contacts.py` 一次性匯入 DB；執行它的 `linebot-migrate-contacts-v1` Job 已移除（ferry133/jg-extras#12），**寫進 contacts.json 不會再出現在 `line_users`**。目前只有 `trello_line_notifier.load_contacts()` 在 DB 讀取失敗時會唯讀退回這個檔案。
 
 ### 4.3 project_photos.yaml 格式
 
@@ -195,24 +188,25 @@ NAS1:/volume2/knowledge/
 LINE 用戶發訊息
     │
     ▼
-customer-service-agent._get_allowed_boards(user_id)
+customer-service-agent._get_user_role_and_projects(user_id)
     │
-    ├─ 讀 contacts.json
-    ├─ projects == "*"  → allowed_boards = None（不過濾）
-    ├─ projects == list → allowed_boards = ["看板A", "看板B"]
-    └─ 未列出           → allowed_boards = []（拒絕）
+    ├─ 查 line_users.role；查無此人 → visitor
+    └─ JOIN line_user_projects × projects（status='active' 且有 trello_board_id）
     │
-    ▼ MQTT request（帶 allowed_boards）
+    ▼ _get_user_auth → allowed_board_ids / owner_alias
+    ├─ admin / employee → allowed_board_ids = None（不過濾）
+    ├─ vendor           → allowed_board_ids = None + owner_alias = 自身 alias（只看被 [@(alias)] 標記的工項）
+    ├─ customer         → allowed_board_ids = 指派看板的 board_id 清單
+    └─ visitor          → allowed_board_ids = []（拒絕）
+    │
+    ▼ MQTT request（帶 allowed_board_ids + owner_alias）
 trello-agent._query()
     │
-    ├─ _scan_all_items()  ← 全量 cache（60s TTL，所有用戶共享）
-    │
-    └─ allowed_boards 過濾（cache 取出後）
-           │
-           ├─ None → 不過濾，回傳全部
-           ├─ []   → 空結果（不應到達此處，已在 customer-service 攔截）
-           └─ list → 保留 board 名稱包含任一 allowed 字串的工項
+    ├─ 全量 cache（60s TTL，所有用戶共享）
+    └─ 依 board_id 與 owner_alias 過濾後回覆
 ```
+
+> 權限一律從 `line_user_projects` JOIN `projects` 查，不得用 `line_users.projects` JSONB。詳見 spec `role-based-access-control`。
 
 ---
 
