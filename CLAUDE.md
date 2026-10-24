@@ -124,7 +124,7 @@ CronJob trello-notifier-daily（08:00 Asia/Taipei，週日至週五 0-5）
 | `CHAT_ENABLED` | 客服自由對話開關；**預設 false（停用）**。恢復：jg-base deploy.yaml 設 `"true"` + rollout。非 `1/true/yes/on` 一律視為關閉（fail-closed）；pod 啟動 log 會印 `chat=enabled|disabled` |
 | `AUTH0_DOMAIN` / `AUTH0_CLIENT_ID` / `AUTH0_CLIENT_SECRET` | admin UI 的 Auth0 登入（linebot 專用 Regular Web App；callback `https://linebot-admin.jiahd.cc/callback`）|
 | `ADMIN_SESSION_SECRET` | admin session cookie 簽章；**未設定則 admin server 拒絕啟動** |
-| `ADMIN_ALLOWED_EMAILS` | admin UI 登入白名單（逗號分隔）；**空＝無人可登入（fail-closed）**。Auth0 只證明身分，這份名單才是閘門 |
+| `ADMIN_ALLOWED_EMAILS` | admin UI 登入白名單（逗號分隔）；**空＝無人可登入（fail-closed）**。Auth0 只證明身分，這份名單才是閘門。值是明文，住在 jg-base `kubernetes/apps/extras/default/linebot/app/admin.yaml` 的 `env`（不在 secret）；改完 push jg-base main，Flux 套用即滾動重啟 admin。比對只轉小寫、**不正規化 Gmail 的點**（`jiahd.oper@` ≠ `jiahdoper@`）。目前：jiahdadm、ferry133、jiahd.oper（2026-10-21 加，jg-base `ea198df`）|
 
 ## Agent Memory DB
 
