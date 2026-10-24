@@ -1,10 +1,8 @@
 ## Purpose
 工程通知的聯絡人來源整合：`trello_line_notifier.py` 從 `line_users` DB table 解析收件人，並把 alias 解析失敗等訊號呈現給營運者。
-
 ## Requirements
-
 ### Requirement: contacts data source
-`trello_line_notifier.py` 的 `load_contacts()` SHALL 從 `line_users` DB table 讀取，回傳 `{name_lower: line_id}` 格式（與現有呼叫方簽名相容）。contacts.json 不再作為主要資料來源。
+`trello_line_notifier.py` 的 `load_contacts()` SHALL 從 `line_users` DB table 讀取，回傳 `{name_lower: line_id}` 格式（與現有呼叫方簽名相容）。contacts.json 不再作為主要資料來源，也不會被同步進 `line_users`；它只在 DB 讀取失敗時作為唯讀退路。
 
 #### Scenario: Load contacts from DB
 - **WHEN** trello-notifier CronJob 執行通知邏輯
@@ -12,18 +10,10 @@
 - **THEN** 回傳 `{display_name.lower(): line_id}` dict
 
 #### Scenario: DB unavailable
-- **WHEN** DB 連線失敗
-- **THEN** `load_contacts()` 回傳空 dict 並記錄 error log
-- **THEN** CronJob 繼續執行但不發送通知（不 crash）
-
-### Requirement: contacts.json migration
-系統 SHALL 提供一次性 migration script，將 contacts.json 的現有資料 upsert 進 `line_users` table。
-
-#### Scenario: Migrate employee contacts
-- **WHEN** 執行 migration script
-- **THEN** contacts.json 中 projects="*" 的聯絡人以 role=employee 寫入 DB
-- **THEN** contacts.json 中 projects=[...] 的聯絡人以 role=customer 寫入 DB
-- **THEN** 已存在的 DB 記錄不被覆蓋（ON CONFLICT DO NOTHING）
+- **WHEN** DB 連線或查詢失敗
+- **THEN** `load_contacts()` 記錄 warning log，改為直接讀取 `knowledge/contacts.json`（唯讀，不寫回 DB）
+- **THEN** contacts.json 不存在或無法讀取時回傳空 dict
+- **THEN** CronJob 繼續執行（不 crash）
 
 ### Requirement: internal-notice recipients
 
@@ -55,3 +45,4 @@
 #### Scenario: 非 morning 時段不改變行為
 - **WHEN** noon 或 evening run 遇到未對應的 alias
 - **THEN** 不產生面向使用者的未對應清單（維持既有行為，僅原有 log 警告）
+
