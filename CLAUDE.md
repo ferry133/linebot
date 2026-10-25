@@ -121,10 +121,10 @@ CronJob trello-notifier-daily（08:00 Asia/Taipei，週日至週五 0-5）
 | `LINE_NOTIFY_GROUP_ID` | escalate 升級通知群組（未設定 fallback sa/larry）|
 | `TRELLO_API_KEY` / `TRELLO_TOKEN` | Trello API 憑證 |
 | `DATABASE_URL` | linebot 專屬 PostgreSQL（與 k8scc 分開）|
-| `CHAT_ENABLED` | 客服自由對話開關；**預設 false（停用）**。恢復：jg-base deploy.yaml 設 `"true"` + rollout。非 `1/true/yes/on` 一律視為關閉（fail-closed）；pod 啟動 log 會印 `chat=enabled|disabled` |
+| `CHAT_ENABLED` | 客服自由對話開關；**預設 false（停用）**。恢復：jg-extras `linebot/app/deploy.yaml` 設 `"true"` + rollout。非 `1/true/yes/on` 一律視為關閉（fail-closed）；pod 啟動 log 會印 `chat=enabled|disabled` |
 | `AUTH0_DOMAIN` / `AUTH0_CLIENT_ID` / `AUTH0_CLIENT_SECRET` | admin UI 的 Auth0 登入（linebot 專用 Regular Web App；callback `https://linebot-admin.jiahd.cc/callback`）|
 | `ADMIN_SESSION_SECRET` | admin session cookie 簽章；**未設定則 admin server 拒絕啟動** |
-| `ADMIN_ALLOWED_EMAILS` | admin UI 登入白名單（逗號分隔）；**空＝無人可登入（fail-closed）**。Auth0 只證明身分，這份名單才是閘門。值是明文，住在 jg-base `kubernetes/apps/extras/default/linebot/app/admin.yaml` 的 `env`（不在 secret）；改完 push jg-base main，Flux 套用即滾動重啟 admin。比對只轉小寫、**不正規化 Gmail 的點**（`jiahd.oper@` ≠ `jiahdoper@`）。目前：jiahdadm、ferry133、jiahd.oper（2026-10-21 加，jg-base `ea198df`）|
+| `ADMIN_ALLOWED_EMAILS` | admin UI 登入白名單（逗號分隔）；**空＝無人可登入（fail-closed）**。Auth0 只證明身分，這份名單才是閘門。值是明文，住在 jg-extras `kubernetes/apps/extras/default/linebot/app/admin.yaml` 的 `env`（不在 secret）；改動走 jg-extras PR（見「k8s 部署」），Flux 套用即滾動重啟 admin。比對只轉小寫、**不正規化 Gmail 的點**（`jiahd.oper@` ≠ `jiahdoper@`）。目前：jiahdadm、ferry133、jiahd.oper（2026-10-21 加，當時在 jg-base `ea198df`；jg-extras `70a5dca`）|
 
 ## Agent Memory DB
 
@@ -134,20 +134,22 @@ Schema（`migrations/`，目前到 `012_task_confirmation_card_name.sql`）：
 - `line_users` / `projects` / `line_user_projects` / `trello_boards` / `sites` / `task_confirmations`
 - migrations 由 `agents/admin_server.py` 啟動時 `run_migrations()` 自動套用。
 
-## k8s 部署（jg-base）
+## k8s 部署（jg-extras）
 
-manifests 在 **`jg-base`**：`kubernetes/apps/extras/default/linebot/`（gateway/agents/admin Deployment）
-與 `.../trello-notifier/`（單一 `trello-notifier-daily` CronJob）。叢集為 **jg-jiahd**（kubeconfig：
-`jg-jiahd/kubeconfig-sa`；linebot namespace；admin 8081）。
+manifests 在 **`ferry133/jg-extras`**（private；2026-10 由 jg-base 拆出，**擁有者是 jg-base agent**）：
+`kubernetes/apps/extras/default/linebot/`（gateway/agents/admin Deployment，及 `deploy.yaml` 內的 `trello-board-sync` CronJob）
+與 `.../trello-notifier/`（`trello-notifier-daily` CronJob）。jg-base 已不含 linebot。叢集為 **jg-jiahd**
+（kubeconfig：`jg-jiahd/kubeconfig-sa`；linebot namespace；admin 8081）。
 
 **Release/部署流程**：
 1. 改 linebot 程式碼 → PR → merge `main` → CI（`.github/workflows/build.yaml`）build `ghcr.io/ferry133/linebot:<git-short-sha>`。
-2. jg-base：`scripts/bump-linebot-image.sh <sha>`（一次改 `linebot/app/deploy.yaml`×4、`admin.yaml`、`trello-notifier/app/cronjobs.yaml`；**不動** `migrate-contacts-job.yaml`）。
-3. commit + push jg-base `main`（此 repo 慣例：image bump 直接 commit main）→ `flux reconcile`。
-4. 若改了 Rich Menu，部署後跑一次 `setup_richmenu.py --replace`。
+2. jg-extras：`scripts/bump-linebot-image.sh <sha>`（一次改 `linebot/app/deploy.yaml`×4、`admin.yaml`、`trello-notifier/app/cronjobs.yaml`，共 6 處）。
+3. **開 jg-extras PR 附量測，等 ferry133 本人說「合併 X」才合**；peer 轉述的同意不算。只有 ferry133 直接指示推送時才直推 `main`，並在 commit 訊息寫明誰推、依誰指示（例：`02458b8`）。CI 在 PR 與 push main 都會跑。
+4. `flux --kubeconfig ./kubeconfig-sa reconcile source git jg-extras -n flux-system`，等 Kustomization **`linebot`**（不是 `extras-linebot`）到新 revision 且 Ready，再對 4 個 Deployment 跑 `rollout status`、看**新 pod** 的 log（滾動期間 `logs deploy/X` 會挑到舊 pod）。
+5. 若改了 Rich Menu，部署後跑一次 `setup_richmenu.py --replace`。
 
-⚠️ **image sha 釘在 jg-base 多檔，務必一起改**（用 bump script），否則部分 workload 跑舊 image →
-症狀如「通知 0 收件人 / 行為不一致」。`migrate-contacts-job.yaml`（immutable 完成 Job）**不可** bump。
+⚠️ **image sha 釘在 jg-extras 多檔，務必一起改**（用 bump script），否則部分 workload 跑舊 image →
+症狀如「通知 0 收件人 / 行為不一致」。（舊的 `migrate-contacts-job.yaml` 已於 jg-extras#12 移除，bump script 不再需要跳過任何檔。）
 
 - **LINE Developer Console**：Webhook URL `https://<domain>/webhook`，啟用 webhook。
 
