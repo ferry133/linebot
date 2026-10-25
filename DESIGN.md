@@ -171,7 +171,7 @@ NAS1:/volume2/knowledge/
 | `line_user_projects` | 使用者 ↔ 專案指派（customer 可見範圍） |
 
 - **建檔**：使用者首次傳訊時 gateway 自動 upsert `line_users`；角色、alias、專案指派在 admin UI 維護。
-- **contacts.json 為 legacy**：早期以 `agents/migrate_contacts.py` 一次性匯入 DB；執行它的 `linebot-migrate-contacts-v1` Job 已移除（ferry133/jg-extras#12），**寫進 contacts.json 不會再出現在 `line_users`**。目前只有 `trello_line_notifier.load_contacts()` 在 DB 讀取失敗時會唯讀退回這個檔案。
+- **contacts.json 為 legacy**：早期以 `agents/migrate_contacts.py` 一次性匯入 DB；執行它的 `linebot-migrate-contacts-v1` Job 已移除（ferry133/jg-extras#12），腳本本身也已刪除，**寫進 contacts.json 不會再出現在 `line_users`**。目前只有 `trello_line_notifier.load_contacts()` 在 DB 讀取失敗時會唯讀退回這個檔案。
 
 ### 4.3 project_photos.yaml 格式
 
